@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block page_title %}Scraper{% endblock %}
+
+{% block content %}
+<div class="page-scraper">
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>Extract <em>clean content</em> from any URL</h1>
+    <p>Smart page detection — homepages list headlines, data pages render tables, articles extract text. Six strategies, Trafilatura-first.</p>
+  </div>
+
+  <!-- Quick access cards -->
+  <div class="quick-cards">
+    <a href="/morning-brief" class="quick-card brief-card">
+      <div class="qc-icon">☀️</div>
+      <div class="qc-body">
+        <div class="qc-title">Morning Brief</div>
+        <div class="qc-desc">Daily market intelligence — auto-runs 08:15 IST Mon–Fri</div>
+      </div>
+      <div class="qc-arrow">→</div>
+    </a>
+    <a href="/portfolio" class="quick-card portfolio-card">
+      <div class="qc-icon">💼</div>
+      <div class="qc-body">
+        <div class="qc-title">Portfolio</div>
+        <div class="qc-desc">Manage holdings &amp; mark sites for daily scraping</div>
+      </div>
+      <div class="qc-arrow">→</div>
+    </a>
+    <a href="/qa" class="quick-card qa-card">
+      <div class="qc-icon">🤖</div>
+      <div class="qc-body">
+        <div class="qc-title">Q&amp;A</div>
+        <div class="qc-desc">Ask questions against scraped content with RAG</div>
+      </div>
+      <div class="qc-arrow">→</div>
+    </a>
+  </div>
+
+  <!-- Input -->
+  <div class="input-section">
+
+    <!-- URL input with autocomplete -->
+    <div class="url-bar" id="urlBar">
+      <span class="url-icon">🔗</span>
+      <div class="url-autocomplete-wrap">
+        <input type="text" id="urlInput" class="url-input"
+          placeholder="URL(s) — separate multiple with comma or semicolon"
+          autocomplete="off" spellcheck="false"
+          oninput="onUrlInput()" onkeydown="onUrlKey(event)" onfocus="onUrlInput(true)">
+        <ul class="autocomplete-list" id="autocompleteList"></ul>
+      </div>
+      <button class="extract-btn" id="extractBtn" onclick="startScrape()">Extract →</button>
+    </div>
+    <div class="input-hint">Separate multiple URLs with <code>,</code> or <code>;</code> — scraped in parallel</div>
+
+    <!-- Filter phrase -->
+    <div class="filter-bar" id="filterBar">
+      <span class="filter-icon">🔍</span>
+      <input type="text" id="filterInput" class="filter-input"
+        placeholder="Filter phrase (optional) — words separated by spaces, matches title or URL"
+        autocomplete="off" spellcheck="false">
+      <span class="filter-hint">Hybrid: regex + AI semantic match</span>
+    </div>
+
+    <!-- Strategy pills -->
+    <div class="strategy-row">
+      <span class="strategy-label">Strategies:</span>
+      {% for s in strategies %}
+      <button class="pill active" data-strategy="{{ s }}" onclick="togglePill(this)">
+        {% if s == 'playwright' %}🎭 {% endif %}{{ s }}
+      </button>
+      {% endfor %}
+    </div>
+
+    <!-- Advanced -->
+    <div class="adv-toggle-row">
+      <button class="adv-toggle" onclick="toggleAdv()">⚙ advanced options</button>
+    </div>
+    <div class="adv-panel" id="advPanel">
+      <div class="adv-field">
+        <label class="adv-label">Wait for CSS selector (Playwright)</label>
+        <input class="adv-input" id="waitSelector" placeholder="e.g. table, .article-body">
+      </div>
+      <div class="adv-field">
+        <label class="adv-label">Extra wait seconds</label>
+        <input class="adv-input" id="waitSeconds" type="number" value="4" min="0" max="20" step="0.5">
+      </div>
+    </div>
+  </div>
+
+  <!-- Results area -->
+  <div id="results"></div>
+
+</div>
+
+<!-- ── Templates (rendered by JS) ────────────────────────────────────────── -->
+
+<!-- Homepage result template -->
+<template id="tmpl-homepage">
+  <div class="result-card" id="result-card">
+    <div class="result-header">
+      <div>
+        <div class="result-title" id="res-title"></div>
+        <div class="result-meta" id="res-meta"></div>
+      </div>
+      <div class="page-type-badge homepage">🏠 Homepage</div>
+    </div>
+    <div class="scoreboard" id="scoreboard"></div>
+    <div class="headlines-section">
+      <div class="headlines-toolbar">
+        <span class="section-label">📰 Headlines — select articles to dig deeper</span>
+        <div class="headlines-actions">
+          <button class="btn-sm" onclick="selectAll()">Select All</button>
+          <button class="btn-sm" onclick="selectNone()">Clear</button>
+          <button class="btn-primary" id="digBtn" onclick="digSelected()" disabled>
+            Dig into Selected →
+          </button>
+        </div>
+      </div>
+      <div class="headlines-table-wrap">
+        <table class="headlines-table" id="headlinesTable">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="checkAll" onchange="toggleAll(this)"></th>
+              <th>Headline</th>
+              <th>Section</th>
+              <th>Summary</th>
+            </tr>
+          </thead>
+          <tbody id="headlinesTbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="timing-bar" id="timing-bar"></div>
+  </div>
+</template>
+
+<!-- Article result template -->
+<template id="tmpl-article">
+  <div class="result-card" id="result-card">
+    <div class="result-header">
+      <div>
+        <div class="result-title" id="res-title"></div>
+        <div class="result-meta" id="res-meta"></div>
+      </div>
+      <div class="page-type-badge article">📄 Article</div>
+    </div>
+    <div class="scoreboard" id="scoreboard"></div>
+    <div class="content-area">
+      <div class="content-toolbar">
+        <span class="section-label">Extracted Content</span>
+        <div class="toolbar-right">
+          <button class="view-btn active" id="btnRendered" onclick="switchView('rendered')">Rendered</button>
+          <button class="view-btn" id="btnRaw" onclick="switchView('raw')">Raw</button>
+          <button class="btn-sm" onclick="copyContent()">⎘ Copy</button>
+          <button class="btn-primary" id="qaBtn" onclick="sendToQA()">Ask AI →</button>
+        </div>
+      </div>
+      <div id="contentBox" class="md-body"></div>
+    </div>
+    <div class="timing-bar" id="timing-bar"></div>
+  </div>
+</template>
+
+<!-- Data page result template -->
+<template id="tmpl-data">
+  <div class="result-card" id="result-card">
+    <div class="result-header">
+      <div>
+        <div class="result-title" id="res-title"></div>
+        <div class="result-meta" id="res-meta"></div>
+      </div>
+      <div class="page-type-badge data">📊 Data Page</div>
+    </div>
+    <div class="scoreboard" id="scoreboard"></div>
+    <div class="content-area">
+      <div class="content-toolbar">
+        <span class="section-label">Extracted Data</span>
+        <div class="toolbar-right">
+          <button class="view-btn active" id="btnTable" onclick="switchView('table')">Tables</button>
+          <button class="view-btn" id="btnRendered" onclick="switchView('rendered')">Text</button>
+          <button class="view-btn" id="btnRaw" onclick="switchView('raw')">Raw</button>
+          <button class="btn-sm" onclick="copyContent()">⎘ Copy</button>
+          <button class="btn-primary" id="qaBtn" onclick="sendToQA()">Ask AI →</button>
+        </div>
+      </div>
+      <div id="contentBox" class="md-body"></div>
+    </div>
+    <div class="timing-bar" id="timing-bar"></div>
+  </div>
+</template>
+
+<!-- Dig results panel -->
+<template id="tmpl-dig-results">
+  <div class="dig-results" id="dig-results-panel">
+    <div class="dig-header">
+      <h3>📥 Scraped Articles</h3>
+      <button class="btn-primary" id="ingestBtn" onclick="ingestForQA()">
+        Ingest All &amp; Ask AI →
+      </button>
+    </div>
+    <div id="dig-articles"></div>
+  </div>
+</template>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/scraper.js?v={{ ver }}"></script>
+{% endblock %}

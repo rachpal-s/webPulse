@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block page_title %}Portfolio{% endblock %}
+
+{% block content %}
+<div class="page-portfolio">
+
+  <div class="portfolio-header">
+    <div>
+      <h2>My Portfolio</h2>
+      <p>Holdings tracked in the morning brief. Add your stocks, mutual funds, or any instrument.</p>
+    </div>
+    <button class="btn-primary" onclick="showAddForm()">+ Add Holding</button>
+  </div>
+
+  <!-- Add/Edit Form -->
+  <div class="holding-form-wrap" id="holdingForm" style="display:none">
+    <div class="holding-form">
+      <div class="form-title" id="formTitle">Add Holding</div>
+      <input type="hidden" id="holdingId">
+      <div class="form-grid">
+        <div class="form-field">
+          <label>Symbol <span class="req">*</span></label>
+          <input type="text" id="fSymbol" placeholder="RELIANCE" style="text-transform:uppercase">
+        </div>
+        <div class="form-field">
+          <label>Name <span class="req">*</span></label>
+          <input type="text" id="fName" placeholder="Reliance Industries">
+        </div>
+        <div class="form-field">
+          <label>Exchange</label>
+          <select id="fExchange">
+            <option value="NSE">NSE</option>
+            <option value="BSE">BSE</option>
+            <option value="MF">Mutual Fund</option>
+            <option value="OTHER">Other</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Sector</label>
+          <input type="text" id="fSector" placeholder="Energy, Banking, IT…">
+        </div>
+        <div class="form-field">
+          <label>Quantity</label>
+          <input type="number" id="fQty" placeholder="100" min="0" step="0.001">
+        </div>
+        <div class="form-field">
+          <label>Avg Buy Price (₹)</label>
+          <input type="number" id="fAvgPrice" placeholder="2500.00" min="0" step="0.01">
+        </div>
+        <div class="form-field full-width">
+          <label>Notes</label>
+          <input type="text" id="fNotes" placeholder="Long-term hold, SIP, etc.">
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-primary" onclick="saveHolding()">Save</button>
+        <button class="btn-sm" onclick="hideForm()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Holdings table -->
+  {% if holdings %}
+  <div class="holdings-table-wrap">
+    <table class="holdings-table">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Name</th>
+          <th>Exchange</th>
+          <th>Sector</th>
+          <th>Qty</th>
+          <th>Avg Price</th>
+          <th>Notes</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in holdings %}
+        <tr id="hrow-{{ h.id }}">
+          <td class="sym-cell">{{ h.symbol }}</td>
+          <td>{{ h.name }}</td>
+          <td><span class="exch-badge">{{ h.exchange }}</span></td>
+          <td class="sector-cell">{{ h.sector or '—' }}</td>
+          <td>{{ h.qty or '—' }}</td>
+          <td>{{ '₹{:,.2f}'.format(h.avg_price) if h.avg_price else '—' }}</td>
+          <td class="notes-cell">{{ h.notes or '' }}</td>
+          <td class="action-cell">
+            <button class="btn-icon" onclick="editHolding({{ h.id }}, {{ h|tojson }})"
+                    title="Edit">✎</button>
+            <button class="btn-icon btn-danger" onclick="deleteHolding({{ h.id }}, '{{ h.symbol }}')"
+                    title="Remove">✕</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">💼</div>
+    <div>No holdings yet. Add your first stock to get personalised morning insights.</div>
+    <button class="btn-primary" style="margin-top:16px" onclick="showAddForm()">
+      + Add First Holding
+    </button>
+  </div>
+  {% endif %}
+
+  <!-- Daily URLs section -->
+  <div class="daily-urls-section">
+    <div class="section-header">
+      <h3>Daily Scrape URLs</h3>
+      <p>These sites are scraped every morning for the brief. Toggle the ★ on any scraped URL.</p>
+    </div>
+    {% if url_history %}
+    <table class="holdings-table">
+      <thead>
+        <tr>
+          <th>Daily</th><th>URL</th><th>Title</th><th>Type</th><th>Used</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in url_history %}
+        <tr>
+          <td style="text-align:center">
+            <button class="daily-toggle {% if u.is_daily %}active{% endif %}"
+                    data-url="{{ u.url }}"
+                    onclick="toggleDaily(this)"
+                    title="{{ 'Remove from daily' if u.is_daily else 'Add to daily' }}">
+              {{ '★' if u.is_daily else '☆' }}
+            </button>
+          </td>
+          <td><a href="{{ u.url }}" target="_blank" class="url-link">{{ u.url }}</a></td>
+          <td>{{ (u.title or '')[:50] }}</td>
+          <td><span class="page-type-badge {{ u.page_type or 'unknown' }}">{{ u.page_type or '?' }}</span></td>
+          <td>{{ u.scrape_count }}×</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted-text">No URLs scraped yet. Use the Scraper to visit some news sites first.</p>
+    {% endif %}
+  </div>
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function showAddForm() {
+  document.getElementById('holdingForm').style.display = 'block';
+  document.getElementById('formTitle').textContent = 'Add Holding';
+  document.getElementById('holdingId').value = '';
+  ['fSymbol','fName','fSector','fQty','fAvgPrice','fNotes'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('fExchange').value = 'NSE';
+  document.getElementById('fSymbol').focus();
+}
+
+function hideForm() {
+  document.getElementById('holdingForm').style.display = 'none';
+}
+
+function editHolding(id, h) {
+  document.getElementById('holdingForm').style.display = 'block';
+  document.getElementById('formTitle').textContent = 'Edit Holding';
+  document.getElementById('holdingId').value = id;
+  document.getElementById('fSymbol').value = h.symbol || '';
+  document.getElementById('fName').value = h.name || '';
+  document.getElementById('fExchange').value = h.exchange || 'NSE';
+  document.getElementById('fSector').value = h.sector || '';
+  document.getElementById('fQty').value = h.qty || '';
+  document.getElementById('fAvgPrice').value = h.avg_price || '';
+  document.getElementById('fNotes').value = h.notes || '';
+  document.getElementById('fSymbol').focus();
+}
+
+async function saveHolding() {
+  const symbol = document.getElementById('fSymbol').value.trim().toUpperCase();
+  const name   = document.getElementById('fName').value.trim();
+  if (!symbol || !name) { alert('Symbol and Name are required.'); return; }
+
+  const payload = {
+    symbol, name,
+    exchange:  document.getElementById('fExchange').value,
+    sector:    document.getElementById('fSector').value.trim(),
+    qty:       parseFloat(document.getElementById('fQty').value) || 0,
+    avg_price: parseFloat(document.getElementById('fAvgPrice').value) || 0,
+    notes:     document.getElementById('fNotes').value.trim(),
+    id:        parseInt(document.getElementById('holdingId').value) || null,
+  };
+
+  const r = await fetch('/api/portfolio', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  });
+  if (r.ok) location.reload();
+  else alert('Save failed: ' + (await r.json()).detail);
+}
+
+async function deleteHolding(id, symbol) {
+  if (!confirm(`Remove ${symbol} from portfolio?`)) return;
+  const r = await fetch(`/api/portfolio/${id}`, { method: 'DELETE' });
+  if (r.ok) document.getElementById(`hrow-${id}`)?.remove();
+  else alert('Delete failed');
+}
+
+async function toggleDaily(btn) {
+  const url = btn.dataset.url;
+  const isDaily = btn.classList.contains('active');
+  console.log('[Daily Toggle] url:', url, 'currently daily:', isDaily);
+  const r = await fetch('/api/url-daily', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ url, is_daily: !isDaily }),
+  });
+  console.log('[Daily Toggle] response:', r.status);
+  if (r.ok) {
+    btn.classList.toggle('active');
+    btn.textContent = btn.classList.contains('active') ? '★' : '☆';
+    btn.title = btn.classList.contains('active') ? 'Remove from daily' : 'Add to daily';
+  }
+}
+</script>
+{% endblock %}

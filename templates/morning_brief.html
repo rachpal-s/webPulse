@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block page_title %}Morning Brief{% endblock %}
+
+{% block content %}
+<div class="page-brief">
+
+  <div class="brief-page-header">
+    <div>
+      <h2>Morning Brief</h2>
+      <p>Daily market intelligence, ready by 09:15 IST.</p>
+    </div>
+    <div class="brief-header-actions">
+      {% if auto_run %}
+        {% if next_run %}
+        <span class="next-run-badge">⏰ Auto: {{ next_run }}</span>
+        {% endif %}
+      {% else %}
+      <span class="next-run-badge" style="border-color:rgba(248,113,113,.3);color:#f87171">
+        ⏸ Auto-run disabled
+      </span>
+      {% endif %}
+      <button class="btn-sm" onclick="runBriefNow()" id="runNowBtn">▶ Run Now</button>
+    </div>
+  </div>
+
+  <!-- Today's brief -->
+  {% if today_brief and today_brief.status == 'done' %}
+  <div class="brief-card today-card">
+    <div class="brief-card-header">
+      <div>
+        <div class="brief-card-date">Today — {{ today_brief.brief_date }}</div>
+        <div class="brief-card-meta">
+          {{ today_brief.articles_scraped }} articles ·
+          Completed {{ today_brief.completed_at | datetimeformat }}
+        </div>
+      </div>
+      <div class="brief-card-actions">
+        {% if today_brief.rag_session_id %}
+        <a href="/qa?session_id={{ today_brief.rag_session_id }}"
+           class="btn-primary">Ask AI →</a>
+        {% endif %}
+        <button class="btn-sm" onclick="toggleBriefContent('today-content')">
+          View Brief
+        </button>
+      </div>
+    </div>
+    <div class="brief-content" id="today-content" style="display:none">
+      <iframe srcdoc="{{ today_brief.html_content | e }}"
+              class="brief-iframe" onload="resizeIframe(this)"></iframe>
+    </div>
+  </div>
+
+  {% elif today_brief and today_brief.status == 'running' %}
+  <div class="brief-card running-card">
+    <div class="brief-running">
+      <div class="spinner"></div>
+      <div>
+        <div class="brief-card-date">Brief running…</div>
+        <div class="brief-card-meta">Started {{ today_brief.started_at | datetimeformat }}</div>
+      </div>
+    </div>
+    <script>setTimeout(() => location.reload(), 15000);</script>
+  </div>
+
+  {% elif today_brief and today_brief.status == 'failed' %}
+  <div class="brief-card failed-card">
+    <div class="brief-card-header">
+      <div class="brief-card-date">Failed — {{ today_brief.brief_date }}</div>
+      <button class="btn-sm" onclick="runBriefNow()">Retry</button>
+    </div>
+    <div class="brief-error">{{ today_brief.error_msg }}</div>
+  </div>
+
+  {% else %}
+  <div class="brief-card pending-card">
+    <div class="brief-pending">
+      <div class="pending-icon">🕐</div>
+      <div>
+        <div class="brief-card-date">No brief yet today</div>
+        <div class="brief-card-meta">
+          Scheduled for {{ cfg.brief_start_time }} IST —
+          <button class="link-btn" onclick="runBriefNow()">run now</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- AI Insights — tabbed -->
+  {% if insights %}
+  <div class="insights-section">
+    <div class="insights-header">
+      <div>
+        <h3>🤖 AI Market Insights</h3>
+        <p class="insights-subtitle">Generated from today's scraped content · click a tab to read</p>
+      </div>
+      <span class="insights-badge">{{ insights | length }} insights</span>
+    </div>
+
+    <!-- Tab bar -->
+    <div class="insight-tabs" id="insightTabs">
+      {% for ins in insights %}
+      <button class="insight-tab {% if loop.first %}active{% endif %}"
+              data-tab="ins-{{ loop.index }}"
+              onclick="switchInsightTab('ins-{{ loop.index }}', this)">
+        {{ ins.prompt_text.split(' ')[0] }}
+        <span class="tab-label">{{ ins.prompt_text.split(' ')[1:] | join(' ') }}</span>
+      </button>
+      {% endfor %}
+    </div>
+
+    <!-- Tab panels -->
+    <div class="insight-panels">
+      {% for ins in insights %}
+      <div class="insight-panel {% if loop.first %}active{% endif %}"
+           id="ins-{{ loop.index }}"
+           data-content="{{ ins.answer_html | e }}"
+           data-sources="{{ ins.sources_json | e }}">
+        <div class="insight-panel-inner"></div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Archive -->
+  {% if archive %}
+  <div class="brief-archive">
+    <h3>Archive</h3>
+    <table class="holdings-table">
+      <thead>
+        <tr>
+          <th>Date</th><th>Status</th><th>Articles</th><th>Completed</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in archive %}
+        <tr>
+          <td>{{ b.brief_date }}</td>
+          <td><span class="status-dot {{ b.status }}">{{ b.status }}</span></td>
+          <td>{{ b.articles_scraped }}</td>
+          <td>{{ b.completed_at | datetimeformat if b.completed_at else '—' }}</td>
+          <td>
+            <a href="/morning-brief?date={{ b.brief_date }}" class="btn-sm">View</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function renderPanel(panel) {
+  const inner = panel.querySelector('.insight-panel-inner');
+  if (inner.innerHTML) return;  // already rendered
+  let html = renderContent(panel.dataset.content || '');
+  // Linkify [Source: Title] citations using stored source map
+  try {
+    const sourceMap = JSON.parse(panel.dataset.sources || '{}');
+    // Invert: sources_json is {url: title}, we need {title: url} for matching
+    const titleToUrl = {};
+    Object.entries(sourceMap).forEach(([url, title]) => { if (title) titleToUrl[title] = url; });
+    html = linkifySources(html, titleToUrl);
+  } catch(e) {}
+  inner.innerHTML = html;
+}
+
+function switchInsightTab(id, btn) {
+  document.querySelectorAll('.insight-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.insight-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  const panel = document.getElementById(id);
+  panel.classList.add('active');
+  renderPanel(panel);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  // Render first panel immediately
+  const first = document.querySelector('.insight-panel.active');
+  if (first) renderPanel(first);
+});
+
+async function runBriefNow() {
+  const btn = document.getElementById('runNowBtn');
+  btn.disabled = true; btn.textContent = 'Running…';
+  try {
+    const r = await fetch('/api/morning-brief/run', { method: 'POST' });
+    const d = await r.json();
+    if (d.status === 'started') {
+      setTimeout(() => location.reload(), 3000);
+    } else {
+      alert('Status: ' + d.status);
+      btn.disabled = false; btn.textContent = '▶ Run Now';
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false; btn.textContent = '▶ Run Now';
+  }
+}
+
+function toggleBriefContent(id) {
+  const el = document.getElementById(id);
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function resizeIframe(iframe) {
+  iframe.style.height = iframe.contentDocument.body.scrollHeight + 40 + 'px';
+}
+</script>
+{% endblock %}

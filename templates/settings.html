@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block page_title %}Settings{% endblock %}
+
+{% block content %}
+<div class="page-settings">
+
+  <div class="settings-header">
+    <h2>Configuration</h2>
+    <p>All settings are loaded from <code>.env</code>. Edit the file and restart the server to apply changes.</p>
+  </div>
+
+  <div class="settings-grid">
+
+    <!-- Ollama Inference -->
+    <div class="settings-card">
+      <div class="settings-card-header">
+        <div class="settings-card-title">🤖 Ollama Inference</div>
+        <div class="status-dot {% if inference_status.ok %}ok{% else %}err{% endif %}">
+          {{ '✓ Connected' if inference_status.ok else '✗ Unreachable' }}
+        </div>
+      </div>
+      <div class="settings-rows">
+        <div class="setting-item">
+          <span class="setting-key">Endpoint</span>
+          <code class="setting-val">{{ cfg.ollama_inference_url }}</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Auth</span>
+          <span class="setting-val {% if inference_status.auth %}pos{% else %}muted{% endif %}">
+            {{ "✓ API key set" if inference_status.auth else "— none (open endpoint)" }}
+          </span>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Model</span>
+          <code class="setting-val">{{ cfg.ollama_inference_model }}</code>
+        </div>
+        {% if inference_status.ok %}
+        <div class="setting-item">
+          <span class="setting-key">Available models</span>
+          <span class="setting-val muted">{{ inference_status.models | join(', ') }}</span>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Model loaded</span>
+          <span class="setting-val {% if inference_status.available %}pos{% else %}neg{% endif %}">
+            {{ '✓ Yes' if inference_status.available else '✗ Not found' }}
+          </span>
+        </div>
+        {% else %}
+        <div class="setting-item">
+          <span class="setting-key">Error</span>
+          <span class="setting-val neg">{{ inference_status.error }}</span>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Ollama Embeddings -->
+    <div class="settings-card">
+      <div class="settings-card-header">
+        <div class="settings-card-title">🧮 Ollama Embeddings</div>
+        <div class="status-dot {% if embed_status.ok %}ok{% else %}err{% endif %}">
+          {{ '✓ Connected' if embed_status.ok else '✗ Unreachable' }}
+        </div>
+      </div>
+      <div class="settings-rows">
+        <div class="setting-item">
+          <span class="setting-key">Endpoint</span>
+          <code class="setting-val">{{ cfg.ollama_embed_url }}</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Auth</span>
+          <span class="setting-val {% if embed_status.auth %}pos{% else %}muted{% endif %}">
+            {{ "✓ API key set" if embed_status.auth else "— none (open endpoint)" }}
+          </span>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Model</span>
+          <code class="setting-val">{{ cfg.ollama_embed_model }}</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Dimensions</span>
+          <code class="setting-val">{{ cfg.embed_dimensions }}</code>
+        </div>
+        {% if embed_status.ok and embed_status.available is defined %}
+        <div class="setting-item">
+          <span class="setting-key">Model loaded</span>
+          <span class="setting-val {% if embed_status.available %}pos{% else %}neg{% endif %}">
+            {{ '✓ Yes' if embed_status.available else '✗ Not found' }}
+          </span>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- RAG Pipeline -->
+    <div class="settings-card">
+      <div class="settings-card-header">
+        <div class="settings-card-title">🔍 RAG Pipeline</div>
+      </div>
+      <div class="settings-rows">
+        <div class="setting-item">
+          <span class="setting-key">Small mode (≤ words)</span>
+          <code class="setting-val">{{ cfg.rag_small_threshold }}</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Medium mode (≤ words)</span>
+          <code class="setting-val">{{ cfg.rag_medium_threshold }}</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Chunking strategy</span>
+          <code class="setting-val">SemanticChunker ({{ cfg.chunk_breakpoint_type }})</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Chunk min/max words</span>
+          <code class="setting-val">{{ cfg.chunk_min_size }} / {{ cfg.chunk_max_size }}</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Vector store</span>
+          <code class="setting-val">SQLite-vec @ {{ cfg.db_path }}</code>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scraper -->
+    <div class="settings-card">
+      <div class="settings-card-header">
+        <div class="settings-card-title">🕷 Scraper</div>
+      </div>
+      <div class="settings-rows">
+        <div class="setting-item">
+          <span class="setting-key">Strategy order</span>
+          <span class="setting-val muted">trafilatura → newspaper3k → readability → goose3 → beautifulsoup → playwright</span>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">HTTP timeout</span>
+          <code class="setting-val">{{ cfg.scraper_timeout }}s</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Max headlines</span>
+          <code class="setting-val">{{ cfg.scraper_max_headlines }}</code>
+        </div>
+        <div class="setting-item">
+          <span class="setting-key">Playwright wait</span>
+          <code class="setting-val">{{ cfg.playwright_wait_seconds }}s</code>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- <div class="settings-footer">
+    <p>To change any value, edit <code>.env</code> and restart: <code>uvicorn main:app --reload --port 8000</code></p>
+  </div> -->
+
+</div>
+{% endblock %}
