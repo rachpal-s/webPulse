@@ -77,22 +77,46 @@ class VectorStore:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.row_factory = sqlite3.Row
+        # WAL mode ensures vec0 virtual table data persists across connections
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
     def _migrate_db(self, conn):
         """Add columns/tables that may be missing in older DB versions."""
+        # CREATE TABLE migrations — use executescript to run multiple statements
+        create_tables = """
+            CREATE TABLE IF NOT EXISTS brief_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                icon TEXT DEFAULT '📰',
+                color TEXT DEFAULT '#22d3ee',
+                is_builtin INTEGER DEFAULT 0,
+                auto_run INTEGER DEFAULT 0,
+                created_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS category_prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_id INTEGER NOT NULL,
+                prompt_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                prompt_text TEXT NOT NULL,
+                UNIQUE(category_id, prompt_key)
+            );
+        """
+        conn.executescript(create_tables)
+        conn.commit()
+
+        # ALTER TABLE migrations — each runs individually, errors ignored
         migrations = [
             "ALTER TABLE url_history ADD COLUMN is_daily INTEGER DEFAULT 0",
             "ALTER TABLE url_history ADD COLUMN last_briefed TEXT DEFAULT ''",
-            """CREATE TABLE IF NOT EXISTS brief_insights (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                brief_date TEXT NOT NULL,
-                prompt_key TEXT NOT NULL,
-                prompt_text TEXT NOT NULL,
-                answer_html TEXT DEFAULT '',
-                generated_at REAL,
-                UNIQUE(brief_date, prompt_key)
-            )""",
+            "ALTER TABLE url_history ADD COLUMN category_id INTEGER DEFAULT NULL",
+            "ALTER TABLE morning_briefs ADD COLUMN category_id INTEGER DEFAULT 1",
+            "ALTER TABLE morning_briefs ADD COLUMN category_name TEXT DEFAULT 'General'",
+            "ALTER TABLE brief_insights ADD COLUMN brief_id INTEGER DEFAULT NULL",
+            "ALTER TABLE brief_categories ADD COLUMN description TEXT DEFAULT ''",
+            "ALTER TABLE brief_insights ADD COLUMN sources_json TEXT DEFAULT '{}'",
             "ALTER TABLE brief_insights ADD COLUMN sources_json TEXT DEFAULT '{}'",
         ]
         for sql in migrations:
@@ -142,7 +166,8 @@ class VectorStore:
                 scrape_count INTEGER DEFAULT 1,
                 page_type TEXT DEFAULT '',
                 is_daily INTEGER DEFAULT 0,      -- 1 = include in morning brief
-                last_briefed TEXT DEFAULT ''     -- date of last morning brief run
+                last_briefed TEXT DEFAULT '',    -- date of last morning brief run
+                category_id INTEGER DEFAULT NULL -- category this URL belongs to
             );
 
             CREATE TABLE IF NOT EXISTS portfolio (
@@ -161,14 +186,17 @@ class VectorStore:
 
             CREATE TABLE IF NOT EXISTS morning_briefs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                brief_date TEXT NOT NULL UNIQUE,  -- YYYY-MM-DD
-                status TEXT DEFAULT 'pending',    -- pending/running/done/failed
+                brief_date TEXT NOT NULL,
+                category_id INTEGER DEFAULT 1,
+                category_name TEXT DEFAULT 'General',
+                status TEXT DEFAULT 'pending',
                 started_at REAL,
                 completed_at REAL,
                 rag_session_id TEXT DEFAULT '',
                 articles_scraped INTEGER DEFAULT 0,
                 html_content TEXT DEFAULT '',
-                error_msg TEXT DEFAULT ''
+                error_msg TEXT DEFAULT '',
+                UNIQUE(brief_date, category_id)
             );
 
             CREATE INDEX IF NOT EXISTS idx_briefs_date
@@ -181,14 +209,18 @@ class VectorStore:
                 prompt_text TEXT NOT NULL,
                 answer_html TEXT DEFAULT '',
                 generated_at REAL,
-                UNIQUE(brief_date, prompt_key)
+                UNIQUE(brief_date, brief_id, prompt_key)
             );
         """)
         conn.commit()
         conn.close()
-        # Run migrations on a fresh connection after schema init
+        # Run migrations first, then seed builtin categories
         conn2 = self._connect()
         self._migrate_db(conn2)
+        try:
+            self._seed_categories(conn2)
+        except Exception:
+            pass  # table may not exist on very old DBs; migrate_db.py handles it
         conn2.close()
 
     def save_session(self, ctx: RAGContext):
@@ -280,6 +312,128 @@ class VectorStore:
 
     # ── URL history ───────────────────────────────────────────────────────────
 
+    # ── Category methods ──────────────────────────────────────────────────────
+
+    BUILTIN_CATEGORIES = [
+        {"name": "Markets", "icon": "📊", "color": "#22d3ee", "is_builtin": 1},
+        {"name": "Tech",    "icon": "💻", "color": "#a78bfa", "is_builtin": 1},
+        {"name": "General", "icon": "📰", "color": "#4ade80", "is_builtin": 1},
+    ]
+
+    def _seed_categories(self, conn):
+        """Insert builtin categories if they don't exist yet."""
+        import time as _time
+        for cat in self.BUILTIN_CATEGORIES:
+            conn.execute("""
+                INSERT OR IGNORE INTO brief_categories
+                (name, icon, color, is_builtin, created_at)
+                VALUES (?,?,?,?,?)
+            """, (cat["name"], cat["icon"], cat["color"], cat["is_builtin"], _time.time()))
+        conn.commit()
+
+    def get_categories(self) -> list[dict]:
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT * FROM brief_categories ORDER BY is_builtin DESC, name"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_category(self, category_id: int) -> Optional[dict]:
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM brief_categories WHERE id=?", (category_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def get_category_by_name(self, name: str) -> Optional[dict]:
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM brief_categories WHERE name=?", (name,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def upsert_category(self, name: str, icon: str = "📰",
+                        color: str = "#22d3ee", auto_run: bool = False,
+                        description: str = "", cat_id: int = None) -> int:
+        import time as _time
+        conn = self._connect()
+        if cat_id:
+            conn.execute(
+                "UPDATE brief_categories SET name=?,icon=?,color=?,auto_run=?,description=? WHERE id=?",
+                (name, icon, color, 1 if auto_run else 0, description, cat_id)
+            )
+        else:
+            conn.execute("""
+                INSERT INTO brief_categories (name,icon,color,auto_run,is_builtin,description,created_at)
+                VALUES (?,?,?,?,0,?,?)
+                ON CONFLICT(name) DO UPDATE SET
+                    icon=excluded.icon, color=excluded.color,
+                    auto_run=excluded.auto_run, description=excluded.description
+            """, (name, icon, color, 1 if auto_run else 0, description, _time.time()))
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM brief_categories WHERE name=?", (name,)
+        ).fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def delete_category(self, cat_id: int):
+        conn = self._connect()
+        conn.execute("DELETE FROM brief_categories WHERE id=? AND is_builtin=0", (cat_id,))
+        conn.commit()
+        conn.close()
+
+    def get_category_prompts(self, category_id: int) -> list[dict]:
+        """Return category-specific prompt overrides."""
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT * FROM category_prompts WHERE category_id=? ORDER BY id",
+            (category_id,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def save_category_prompt(self, category_id: int, prompt_key: str,
+                              label: str, prompt_text: str):
+        conn = self._connect()
+        conn.execute("""
+            INSERT OR REPLACE INTO category_prompts
+            (category_id, prompt_key, label, prompt_text)
+            VALUES (?,?,?,?)
+        """, (category_id, prompt_key, label, prompt_text))
+        conn.commit()
+        conn.close()
+
+    def delete_category_prompt(self, category_id: int, prompt_key: str):
+        conn = self._connect()
+        conn.execute(
+            "DELETE FROM category_prompts WHERE category_id=? AND prompt_key=?",
+            (category_id, prompt_key)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_urls_by_category(self, category_id: int) -> list[dict]:
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT * FROM url_history WHERE category_id=? ORDER BY last_scraped DESC",
+            (category_id,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def set_url_category(self, url: str, category_id: Optional[int]):
+        conn = self._connect()
+        conn.execute(
+            "UPDATE url_history SET category_id=?, is_daily=? WHERE url=?",
+            (category_id, 1 if category_id else 0, url)
+        )
+        conn.commit()
+        conn.close()
+
     # ── Portfolio methods ─────────────────────────────────────────────────────
 
     def get_portfolio(self) -> list[dict]:
@@ -319,78 +473,117 @@ class VectorStore:
 
     # ── Morning brief methods ──────────────────────────────────────────────────
 
-    def get_brief(self, date_str: str) -> Optional[dict]:
+    def get_brief(self, date_str: str, category_id: int = None) -> Optional[dict]:
         conn = self._connect()
-        row = conn.execute(
-            "SELECT * FROM morning_briefs WHERE brief_date=?", (date_str,)
-        ).fetchone()
+        if category_id:
+            row = conn.execute(
+                "SELECT * FROM morning_briefs WHERE brief_date=? AND category_id=?",
+                (date_str, category_id)
+            ).fetchone()
+        else:
+            # Return most recent brief for the date
+            row = conn.execute(
+                "SELECT * FROM morning_briefs WHERE brief_date=? ORDER BY started_at DESC LIMIT 1",
+                (date_str,)
+            ).fetchone()
         conn.close()
         return dict(row) if row else None
 
-    def get_recent_briefs(self, limit: int = 10) -> list[dict]:
+    def get_briefs_by_date(self, date_str: str) -> list[dict]:
+        """Return all briefs for a date (one per category)."""
         conn = self._connect()
         rows = conn.execute(
-            "SELECT id,brief_date,status,started_at,completed_at,articles_scraped "
-            "FROM morning_briefs ORDER BY brief_date DESC LIMIT ?", (limit,)
+            "SELECT * FROM morning_briefs WHERE brief_date=? ORDER BY category_name",
+            (date_str,)
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
-    def start_brief(self, date_str: str) -> int:
+    def get_recent_briefs(self, limit: int = 30) -> list[dict]:
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT id,brief_date,category_id,category_name,status,"
+            "started_at,completed_at,articles_scraped "
+            "FROM morning_briefs ORDER BY brief_date DESC, category_name LIMIT ?",
+            (limit,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def start_brief(self, date_str: str, category_id: int = 1,
+                    category_name: str = "General") -> int:
         import time as _time
         conn = self._connect()
         conn.execute("""
             INSERT OR REPLACE INTO morning_briefs
-            (brief_date,status,started_at,html_content,error_msg)
-            VALUES (?,'running',?,'','')
-        """, (date_str, _time.time()))
+            (brief_date,category_id,category_name,status,started_at,html_content,error_msg)
+            VALUES (?,?,?,'running',?,'','')
+        """, (date_str, category_id, category_name, _time.time()))
         conn.commit()
         row = conn.execute(
-            "SELECT id FROM morning_briefs WHERE brief_date=?", (date_str,)
+            "SELECT id FROM morning_briefs WHERE brief_date=? AND category_id=?",
+            (date_str, category_id)
         ).fetchone()
         conn.close()
         return row[0]
 
     def finish_brief(self, date_str: str, html: str, session_id: str,
-                     articles: int, error: str = ""):
+                     articles: int, error: str = "", category_id: int = None):
         import time as _time
         status = "done" if not error else "failed"
         conn = self._connect()
-        conn.execute("""
-            UPDATE morning_briefs SET status=?,completed_at=?,
-            rag_session_id=?,articles_scraped=?,html_content=?,error_msg=?
-            WHERE brief_date=?
-        """, (status, _time.time(), session_id, articles, html, error, date_str))
+        if category_id:
+            conn.execute("""
+                UPDATE morning_briefs SET status=?,completed_at=?,
+                rag_session_id=?,articles_scraped=?,html_content=?,error_msg=?
+                WHERE brief_date=? AND category_id=?
+            """, (status, _time.time(), session_id, articles, html, error,
+                  date_str, category_id))
+        else:
+            conn.execute("""
+                UPDATE morning_briefs SET status=?,completed_at=?,
+                rag_session_id=?,articles_scraped=?,html_content=?,error_msg=?
+                WHERE brief_date=? ORDER BY started_at DESC LIMIT 1
+            """, (status, _time.time(), session_id, articles, html, error, date_str))
         conn.commit()
         conn.close()
 
     def save_insight(self, date_str: str, prompt_key: str,
-                     prompt_text: str, answer_html: str, sources: list = None):
+                     prompt_text: str, answer_html: str,
+                     sources: list = None, brief_id: int = None):
         import time as _time, json as _json
         conn = self._connect()
-        # Add sources_json column if missing
-        try:
-            conn.execute("ALTER TABLE brief_insights ADD COLUMN sources_json TEXT DEFAULT '{}'")
-            conn.commit()
-        except Exception:
-            pass
-        sources_json = _json.dumps({s.get("url",""): s.get("title","") for s in (sources or []) if s.get("url")})
+        sources_json = _json.dumps({
+            s.get("url",""): s.get("title","")
+            for s in (sources or []) if s.get("url")
+        })
         conn.execute("""
             INSERT OR REPLACE INTO brief_insights
-            (brief_date, prompt_key, prompt_text, answer_html, generated_at, sources_json)
-            VALUES (?,?,?,?,?,?)
-        """, (date_str, prompt_key, prompt_text, answer_html, _time.time(), sources_json))
+            (brief_date, brief_id, prompt_key, prompt_text,
+             answer_html, generated_at, sources_json)
+            VALUES (?,?,?,?,?,?,?)
+        """, (date_str, brief_id, prompt_key, prompt_text,
+              answer_html, _time.time(), sources_json))
         conn.commit()
         conn.close()
 
-    def get_insights(self, date_str: str) -> list[dict]:
+    def get_insights(self, date_str: str, brief_id: int = None) -> list[dict]:
         conn = self._connect()
-        rows = conn.execute("""
-            SELECT prompt_key, prompt_text, answer_html, generated_at,
-                   COALESCE(sources_json, '{}') as sources_json
-            FROM brief_insights WHERE brief_date=?
-            ORDER BY id
-        """, (date_str,)).fetchall()
+        if brief_id:
+            # Filter strictly by brief_id — no cross-category fallback
+            rows = conn.execute("""
+                SELECT prompt_key, prompt_text, answer_html, generated_at,
+                       COALESCE(sources_json, '{}') as sources_json
+                FROM brief_insights WHERE brief_date=? AND brief_id=?
+                ORDER BY id
+            """, (date_str, brief_id)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT prompt_key, prompt_text, answer_html, generated_at,
+                       COALESCE(sources_json, '{}') as sources_json
+                FROM brief_insights WHERE brief_date=?
+                ORDER BY id
+            """, (date_str,)).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
@@ -440,7 +633,8 @@ class VectorStore:
         select = """
             SELECT url, title, last_scraped, scrape_count, page_type,
                    COALESCE(is_daily, 0) as is_daily,
-                   COALESCE(last_briefed, '') as last_briefed
+                   COALESCE(last_briefed, '') as last_briefed,
+                   category_id
             FROM url_history
         """
         if prefix:
@@ -708,6 +902,12 @@ async def query(
                     else:
                         raise
             relevant = store.similarity_search(session_id, q_emb[0], top_k=top_k)
+            import logging as _log
+            _log.getLogger("rag").info("similarity_search returned %d chunks for session %s",
+                                        len(relevant), session_id)
+            # If vector search returns nothing, fall back immediately to full context
+            if not relevant:
+                raise Exception("similarity_search returned 0 results — using keyword fallback")
             context_parts = []
             seen: dict = {}   # url -> title
             for row in relevant:
@@ -734,12 +934,30 @@ async def query(
                 if score > 0:
                     scored.append((score, idx, c))  # idx breaks ties
             scored.sort(key=lambda x: x[0], reverse=True)
-            top = [c for _, _, c in scored[:top_k]]
+            # If no keyword matches, use ALL chunks (better than empty context)
+            top = [c for _, _, c in scored[:top_k]] if scored else chunks[:top_k]
+            _log2 = __import__("logging").getLogger("rag")
+            _log2.info("Keyword fallback: %d scored, %d used from %d total chunks",
+                       len(scored), len(top), len(chunks))
             context_text = "\n\n---\n\n".join(
                 f"[Source: {c['source_title']}]\n{c['content']}" for c in top
             )
             sources_used = session.get("sources") or []
             chunks_used = len(top)
+
+    # ── Last resort: if context is empty, use all chunks ─────────────────────
+    if not context_text.strip():
+        import logging as _lg
+        _lg.getLogger("rag").warning(
+            "context_text empty after all searches — loading all chunks directly"
+        )
+        all_chunks = store.get_all_chunks(session_id)
+        context_text = "\n\n---\n\n".join(
+            f"[Source: {c.get('source_title','') or c.get('source_url','')}]\n{c['content']}"
+            for c in all_chunks[:top_k * 2]
+        )
+        sources_used = session.get("sources") or []
+        chunks_used = len(all_chunks)
 
     # ── Build prompt ──────────────────────────────────────────────────────────
     system_prompt = (
@@ -747,11 +965,11 @@ async def query(
         "the provided context. If the answer is not in the context, say so clearly. "
         "Be concise, factual, and always cite your sources.\n\n"
         "CITATION RULES:\n"
-        "- Every factual claim MUST be followed by a source link.\n"
+        "- Where possible, add a source citation after factual claims.\n"
         "- Citation format: [Source Title](URL) — Markdown link syntax.\n"
-        "- Extract the URL from [Source: title | URL: ...] markers in context.\n"
-        "- In tables, add a Source column with Markdown links.\n"
-        "- Never make claims without citing a source from the provided context.\n\n"
+        "- Extract the URL from [CITE AS: ...] markers in the context.\n"
+        "- If no URL is available, include the source title in brackets: [Source: Title].\n"
+        "- DO NOT refuse to answer just because you cannot cite every claim.\n\n"
         "FORMATTING RULES:\n"
         "- Always respond in clean HTML (no markdown, no triple backticks).\n"
         "- Use <table> with <thead>/<tbody>/<tr>/<th>/<td> for tabular data.\n"

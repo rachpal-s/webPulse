@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     portfolio_symbols: str = ""              # fallback if DB portfolio empty e.g. "RELIANCE,TCS"
     portfolio_analysis_enabled: bool = True  # set false to skip per-holding Q&A in brief
     brief_prompts_json: str = ""             # JSON override for DEFAULT_PROMPTS; empty = use defaults
+    brief_default_category: str = "Markets"  # category name for auto-run scheduler
 
     @property
     def brief_default_prompts(self) -> list[dict]:

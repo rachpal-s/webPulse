@@ -92,33 +92,48 @@ async def send_email(subject: str, html_body: str):
 
 # ── Main brief runner ─────────────────────────────────────────────────────────
 
-async def run_morning_brief(force: bool = False) -> dict:
+async def run_morning_brief(force: bool = False,
+                             category_id: int = None,
+                             category_name: str = None) -> dict:
     """
-    Run the morning brief. Returns status dict.
+    Run the morning brief for a specific category.
     force=True skips the already-run-today check.
     """
     today = date.today().isoformat()
     store = get_store()
     ollama = get_ollama_client()
 
-    # ── Check if already ran today ────────────────────────────────────────────
-    existing = store.get_brief(today)
-    if existing and existing["status"] == "done" and not force:
-        log.info("Brief for %s already done — skipping", today)
-        return {"status": "already_done", "date": today}
+    # ── Resolve category ──────────────────────────────────────────────────────
+    if not category_id:
+        cat = store.get_category_by_name(cfg.brief_default_category)
+        if not cat:
+            cats = store.get_categories()
+            cat = cats[0] if cats else {"id": 1, "name": "General"}
+        category_id = cat["id"]
+        category_name = cat["name"]
+    elif not category_name:
+        cat = store.get_category(category_id)
+        category_name = cat["name"] if cat else "General"
 
-    print(f"[BRIEF] Starting morning brief for {today}", flush=True)
-    log.info("Starting morning brief for %s", today)
-    store.start_brief(today)
+    existing = store.get_brief(today, category_id)
+    if existing and existing["status"] == "done" and not force:
+        log.info("Brief for %s/%s already done", today, category_name)
+        return {"status": "already_done", "date": today, "category": category_name}
+
+    print(f"[BRIEF] Starting {category_name} brief for {today}", flush=True)
+    log.info("Starting brief for %s / %s", today, category_name)
+    brief_id = store.start_brief(today, category_id, category_name)
 
     try:
         # ── Step 1: Get daily URLs ────────────────────────────────────────────
-        daily_urls = store.get_daily_urls()
-        print(f"[BRIEF] Daily URLs found: {len(daily_urls)}", flush=True)
+        daily_urls = store.get_urls_by_category(category_id)
+        if not daily_urls:
+            daily_urls = store.get_daily_urls()
+        print(f"[BRIEF] URLs for {category_name}: {len(daily_urls)}", flush=True)
         if not daily_urls:
             log.warning("No daily URLs configured. Mark URLs as daily in the portfolio page.")
             store.finish_brief(today, _no_urls_html(today), "", 0,
-                               "No daily URLs configured")
+                               "No daily URLs configured", category_id)
             return {"status": "no_urls"}
 
         log.info("Scraping %d daily URLs", len(daily_urls))
@@ -200,7 +215,7 @@ async def run_morning_brief(force: bool = False) -> dict:
 
         if not all_documents:
             store.finish_brief(today, _no_content_html(today), "", 0,
-                               "No content scraped")
+                               "No content scraped", category_id)
             return {"status": "no_content"}
 
         log.info("Ingesting %d documents into RAG", len(all_documents))
@@ -258,22 +273,69 @@ async def run_morning_brief(force: bool = False) -> dict:
         )
 
         # ── Step 8: Save + send ────────────────────────────────────────────────
-        # ── Step 7b: Default insight prompts ─────────────────────────────────────
-        log.info("Running %d default insight prompts", len(_get_prompts()))
-        print(f"[BRIEF] Running {len(_get_prompts())} insight prompts", flush=True)
-        for dp in _get_prompts():
-            try:
-                print(f"[BRIEF] Prompt: {dp['key']}", flush=True)
-                ins_result = await rag_query(session_id, dp["prompt"], top_k=8)
-                store.save_insight(today, dp["key"], dp["label"],
-                                   ins_result.answer, ins_result.sources_used)
-                log.info("Insight done: %s", dp["key"])
-            except Exception as e:
-                log.warning("Insight failed %s: %s", dp["key"], e)
-                store.save_insight(today, dp["key"], dp["label"],
-                    f"<p style='color:#f87171'>Could not generate: {e}</p>")
+        # ── Step 7b: Category-aware insight prompts ──────────────────────────────
+        cat_prompts_raw = store.get_category_prompts(category_id)
+        # Normalise DB rows to same shape as default prompts: {key, label, prompt}
+        cat_prompts = [
+            {"key": p["prompt_key"], "label": p["label"], "prompt": p["prompt_text"]}
+            for p in cat_prompts_raw
+            if p.get("prompt_key") and p["prompt_key"] not in ("undefined", "unknown", "")
+            and p.get("prompt_text")
+        ] if cat_prompts_raw else []
 
-        store.finish_brief(today, html, session_id, len(all_documents))
+        is_market = category_name.lower() in ("markets", "market", "finance", "stocks")
+        if cat_prompts:
+            prompts_to_run = cat_prompts
+        else:
+            prompts_to_run = []
+            for dp in _get_prompts():
+                p = dict(dp)
+                if not is_market:
+                    p["prompt"] = (
+                        p["prompt"]
+                        .replace("today's news", f"today's {category_name} news")
+                        .replace("Indian stock market (Sensex/Nifty)", f"{category_name} domain")
+                        .replace("Indian stock market", f"{category_name} landscape")
+                        .replace("stocks have been explicitly recommended by analysts or experts",
+                                 f"topics or entities highlighted by experts in {category_name}")
+                        .replace("Stock, Recommendation (BUY/SELL/HOLD), Target Price (if mentioned), Analyst/Source, and Key Reason",
+                                 f"Topic, View (Positive/Negative/Neutral), Source, Key Reason")
+                        .replace("FII/DII activity, sector trends, and macro factors",
+                                 f"key developments, trends, and influencing factors")
+                        .replace("bullish, bearish, or range-bound",
+                                 f"positive, negative, or neutral")
+                        .replace("Sensex/Nifty", category_name)
+                    )
+                else:
+                    p["prompt"] = p["prompt"].replace("today's news", f"today's {category_name} news")
+                prompts_to_run.append(p)
+
+        log.info("Running %d prompts for %s", len(prompts_to_run), category_name)
+        print(f"[BRIEF] Running {len(prompts_to_run)} prompts for {category_name}", flush=True)
+        print(f"[BRIEF] RAG session: {session_id} | mode: {rag_ctx.mode} | chunks: {rag_ctx.chunk_count}", flush=True)
+        for dp in prompts_to_run:
+            try:
+                print(f"[BRIEF] Prompt key : {dp['key']}", flush=True)
+                print(f"[BRIEF] Prompt text: {dp['prompt'][:200]}…", flush=True)
+                ins_result = await rag_query(session_id, dp["prompt"], top_k=8)
+                if not ins_result.answer or len(ins_result.answer.strip()) < 20:
+                    log.warning("Empty answer for %s — retrying with top_k=20", dp["key"])
+                    ins_result = await rag_query(session_id, dp["prompt"], top_k=20)
+                store.save_insight(today, dp["key"], dp["label"],
+                                   ins_result.answer, ins_result.sources_used,
+                                   brief_id=brief_id)
+                log.info("Insight done: %s (len=%d) preview: %s",
+                          dp["key"], len(ins_result.answer),
+                          ins_result.answer[:150].replace("\n"," "))
+            except Exception as e:
+                import traceback as _tb
+                log.warning("Insight failed %s: %s\n%s", dp["key"], e, _tb.format_exc())
+                store.save_insight(today, dp["key"], dp["label"],
+                    f"<p style='color:#f87171'>Could not generate: {e}</p>",
+                    brief_id=brief_id)
+
+        store.finish_brief(today, html, session_id, len(all_documents),
+                            category_id=category_id)
 
         subject = f"📊 Morning Market Brief — {datetime.now().strftime('%a %d %b %Y')}"
         await send_email(subject, html)
@@ -283,6 +345,9 @@ async def run_morning_brief(force: bool = False) -> dict:
         return {
             "status": "done",
             "date": today,
+            "category": category_name,
+            "category_id": category_id,
+            "brief_id": brief_id,
             "session_id": session_id,
             "articles": len(all_documents),
             "holdings_analysed": len(portfolio),
@@ -292,7 +357,7 @@ async def run_morning_brief(force: bool = False) -> dict:
         err = traceback.format_exc()
         print(f"[BRIEF] EXCEPTION: {err}", flush=True)
         log.error("Brief failed: %s", err)
-        store.finish_brief(today, _error_html(today, str(e)), "", 0, str(e))
+        store.finish_brief(today, _error_html(today, str(e)), "", 0, str(e), category_id)
         return {"status": "failed", "error": str(e)}
 
 

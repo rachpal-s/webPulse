@@ -3,213 +3,416 @@
 
 {% block content %}
 <div class="page-brief">
+<script>
+// resizeIframe defined inline above
+</script>
 
   <div class="brief-page-header">
     <div>
       <h2>Morning Brief</h2>
-      <p>Daily market intelligence, ready by 09:15 IST.</p>
+      <p>Category-aware daily intelligence. Pick a category and run.</p>
     </div>
     <div class="brief-header-actions">
-      {% if auto_run %}
-        {% if next_run %}
-        <span class="next-run-badge">⏰ Auto: {{ next_run }}</span>
-        {% endif %}
-      {% else %}
-      <span class="next-run-badge" style="border-color:rgba(248,113,113,.3);color:#f87171">
-        ⏸ Auto-run disabled
-      </span>
+      {% if auto_run and next_run %}
+      <span class="next-run-badge">⏰ Auto: {{ next_run }}</span>
+      {% elif not auto_run %}
+      <span class="next-run-badge" style="border-color:rgba(248,113,113,.3);color:#f87171">⏸ Auto-run disabled</span>
       {% endif %}
-      <button class="btn-sm" onclick="runBriefNow()" id="runNowBtn">▶ Run Now</button>
     </div>
   </div>
 
-  <!-- Today's brief -->
-  {% if today_brief and today_brief.status == 'done' %}
-  <div class="brief-card today-card">
-    <div class="brief-card-header">
-      <div>
-        <div class="brief-card-date">Today — {{ today_brief.brief_date }}</div>
-        <div class="brief-card-meta">
-          {{ today_brief.articles_scraped }} articles ·
-          Completed {{ today_brief.completed_at | datetimeformat }}
+  <!-- Run panel -->
+  <div class="run-panel">
+    <div class="run-panel-inner">
+      <div class="run-label">Run Brief For:</div>
+      <div class="category-pills" id="categoryPills">
+        {% for cat in categories %}
+        <button class="cat-pill {% if loop.first %}active{% endif %}"
+                data-id="{{ cat.id }}" data-name="{{ cat.name }}"
+                onclick="selectCategory(this)">
+          {{ cat.icon }} {{ cat.name }}
+        </button>
+        {% endfor %}
+      </div>
+      <button class="btn-primary" onclick="runBriefNow()" id="runNowBtn">▶ Run Now</button>
+    </div>
+    <div class="run-hint">Scrapes URLs tagged to the selected category · <a href="/portfolio" class="link-btn">Tag URLs →</a></div>
+
+    <!-- Category manager -->
+    <div class="cat-manager">
+      <div class="cat-manager-title">Manage Categories</div>
+      <div class="cat-manager-list" id="catManagerList">
+        {% for cat in categories %}
+        <div class="cat-manager-item" id="catitem-{{ cat.id }}">
+          <span>{{ cat.icon }}</span>
+          <strong style="font-size:.8rem">{{ cat.name }}</strong>
+          <button class="btn-icon" onclick="editPrompts({{ cat.id }}, '{{ cat.name }}')"
+                  style="font-size:.65rem;padding:2px 6px;" title="Edit prompts">✎ Prompts</button>
+          {% if cat.is_builtin %}<span>builtin</span>{% else %}
+          <button class="cat-del-btn" onclick="deleteCategory({{ cat.id }}, '{{ cat.name }}')" title="Delete">✕</button>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <div class="cat-add-row">
+        <input type="text" id="newCatIcon" class="cat-icon-input" placeholder="📰" value="📰" maxlength="4">
+        <input type="text" id="newCatName" placeholder="Category name" maxlength="30">
+        <input type="text" id="newCatDesc" placeholder="Describe what this category covers (used to generate prompts)" style="flex:2;min-width:220px">
+        <button class="btn-sm" onclick="addCategory()" id="addCatBtn">+ Add</button>
+      </div>
+      <div style="font-size:.68rem;color:var(--muted);margin-top:6px;">
+        💡 Provide a description to auto-generate tailored AI insight prompts for this category
+      </div>
+    </div>
+  </div>
+
+  <!-- Today's briefs -->
+  {% if today_briefs %}
+  <div class="brief-section">
+    <div class="brief-section-title">Today — {{ view_date }}</div>
+    <div class="outer-tabs">
+      {% for b in today_briefs %}
+      <button class="outer-tab {% if loop.first %}active{% endif %}"
+              onclick="switchOuterTab('brief-{{ b.id }}', this)">
+        {% for cat in categories %}{% if cat.id == b.category_id %}{{ cat.icon }}{% endif %}{% endfor %}
+        {{ b.category_name }}
+        <span class="outer-tab-status {{ b.status }}">{{ b.status }}</span>
+      </button>
+      {% endfor %}
+    </div>
+
+    {% for b in today_briefs %}
+    <div class="outer-panel {% if loop.first %}active{% endif %}" id="brief-{{ b.id }}">
+      <div class="brief-meta-bar">
+        <span class="brief-meta-item">📄 {{ b.articles_scraped }} articles</span>
+        <span class="brief-meta-item">⏱ {{ b.completed_at | datetimeformat }}</span>
+        {% if b.rag_session_id %}<a href="/qa?session_id={{ b.rag_session_id }}" class="btn-sm">Ask AI →</a>{% endif %}
+        <button class="btn-sm" onclick="emailBrief({{ b.id }}, '{{ b.category_name }}')">✉ Email This</button>
+        <button class="btn-sm" onclick="toggleBriefHtml('brief-html-{{ b.id }}')">View Full Brief</button>
+      </div>
+
+      {% if b.insights %}
+      <div class="insights-section" style="margin-top:0;">
+        <div class="insights-header">
+          <div>
+            <h3>🤖 AI Insights — {{ b.category_name }}</h3>
+            <p class="insights-subtitle">Generated from {{ b.articles_scraped }} articles</p>
+          </div>
+          <span class="insights-badge">{{ b.insights | length }} insights</span>
+        </div>
+        <div class="insight-tabs" id="tabs-{{ b.id }}">
+          {% for ins in b.insights %}
+          <button class="insight-tab {% if loop.first %}active{% endif %}"
+                  onclick="switchInsightTab('ins-{{ b.id }}-{{ loop.index }}', this, 'tabs-{{ b.id }}', 'panels-{{ b.id }}')">
+            {{ ins.prompt_text.split(' ')[0] }}
+            <span class="tab-label">{{ ins.prompt_text.split(' ')[1:] | join(' ') }}</span>
+          </button>
+          {% endfor %}
+        </div>
+        <div class="insight-panels" id="panels-{{ b.id }}">
+          {% for ins in b.insights %}
+          <div class="insight-panel {% if loop.first %}active{% endif %}"
+               id="ins-{{ b.id }}-{{ loop.index }}"
+               data-content="{{ ins.answer_html | e }}"
+               data-sources="{{ ins.sources_json | e }}">
+            <div class="insight-panel-inner"></div>
+          </div>
+          {% endfor %}
         </div>
       </div>
-      <div class="brief-card-actions">
-        {% if today_brief.rag_session_id %}
-        <a href="/qa?session_id={{ today_brief.rag_session_id }}"
-           class="btn-primary">Ask AI →</a>
-        {% endif %}
-        <button class="btn-sm" onclick="toggleBriefContent('today-content')">
-          View Brief
-        </button>
+      {% elif b.status == 'running' %}
+      <div style="padding:24px;display:flex;gap:12px;align-items:center;color:var(--muted);">
+        <div class="spinner"></div> Brief running… auto-refreshing
+      </div>
+      <script>setTimeout(() => location.reload(), 10000);</script>
+      {% else %}
+      <div style="padding:24px;color:var(--muted);font-size:.88rem;">No insights yet.</div>
+      {% endif %}
+
+      <div class="brief-html-wrap" id="brief-html-{{ b.id }}" style="display:none">
+        <iframe srcdoc="{{ b.html_content | e }}" class="brief-iframe" onload="resizeIframe(this)"></iframe>
       </div>
     </div>
-    <div class="brief-content" id="today-content" style="display:none">
-      <iframe srcdoc="{{ today_brief.html_content | e }}"
-              class="brief-iframe" onload="resizeIframe(this)"></iframe>
-    </div>
+    {% endfor %}
   </div>
-
-  {% elif today_brief and today_brief.status == 'running' %}
-  <div class="brief-card running-card">
-    <div class="brief-running">
-      <div class="spinner"></div>
-      <div>
-        <div class="brief-card-date">Brief running…</div>
-        <div class="brief-card-meta">Started {{ today_brief.started_at | datetimeformat }}</div>
-      </div>
-    </div>
-    <script>setTimeout(() => location.reload(), 15000);</script>
-  </div>
-
-  {% elif today_brief and today_brief.status == 'failed' %}
-  <div class="brief-card failed-card">
-    <div class="brief-card-header">
-      <div class="brief-card-date">Failed — {{ today_brief.brief_date }}</div>
-      <button class="btn-sm" onclick="runBriefNow()">Retry</button>
-    </div>
-    <div class="brief-error">{{ today_brief.error_msg }}</div>
-  </div>
-
   {% else %}
   <div class="brief-card pending-card">
     <div class="brief-pending">
       <div class="pending-icon">🕐</div>
       <div>
-        <div class="brief-card-date">No brief yet today</div>
-        <div class="brief-card-meta">
-          Scheduled for {{ cfg.brief_start_time }} IST —
-          <button class="link-btn" onclick="runBriefNow()">run now</button>
-        </div>
+        <div class="brief-card-date">No briefs yet today</div>
+        <div class="brief-card-meta">Pick a category above and click ▶ Run Now</div>
       </div>
-    </div>
-  </div>
-  {% endif %}
-
-  <!-- AI Insights — tabbed -->
-  {% if insights %}
-  <div class="insights-section">
-    <div class="insights-header">
-      <div>
-        <h3>🤖 AI Market Insights</h3>
-        <p class="insights-subtitle">Generated from today's scraped content · click a tab to read</p>
-      </div>
-      <span class="insights-badge">{{ insights | length }} insights</span>
-    </div>
-
-    <!-- Tab bar -->
-    <div class="insight-tabs" id="insightTabs">
-      {% for ins in insights %}
-      <button class="insight-tab {% if loop.first %}active{% endif %}"
-              data-tab="ins-{{ loop.index }}"
-              onclick="switchInsightTab('ins-{{ loop.index }}', this)">
-        {{ ins.prompt_text.split(' ')[0] }}
-        <span class="tab-label">{{ ins.prompt_text.split(' ')[1:] | join(' ') }}</span>
-      </button>
-      {% endfor %}
-    </div>
-
-    <!-- Tab panels -->
-    <div class="insight-panels">
-      {% for ins in insights %}
-      <div class="insight-panel {% if loop.first %}active{% endif %}"
-           id="ins-{{ loop.index }}"
-           data-content="{{ ins.answer_html | e }}"
-           data-sources="{{ ins.sources_json | e }}">
-        <div class="insight-panel-inner"></div>
-      </div>
-      {% endfor %}
     </div>
   </div>
   {% endif %}
 
   <!-- Archive -->
-  {% if archive %}
+  {% if archive_by_date %}
   <div class="brief-archive">
     <h3>Archive</h3>
     <table class="holdings-table">
-      <thead>
-        <tr>
-          <th>Date</th><th>Status</th><th>Articles</th><th>Completed</th><th></th>
-        </tr>
-      </thead>
+      <thead><tr><th>Date</th><th>Category</th><th>Status</th><th>Articles</th><th>Completed</th><th></th></tr></thead>
       <tbody>
-        {% for b in archive %}
+        {% for date_str, briefs in archive_by_date.items() %}
+        {% for b in briefs %}
         <tr>
           <td>{{ b.brief_date }}</td>
+          <td>{% for cat in categories %}{% if cat.id == b.category_id %}{{ cat.icon }} {% endif %}{% endfor %}{{ b.category_name }}</td>
           <td><span class="status-dot {{ b.status }}">{{ b.status }}</span></td>
           <td>{{ b.articles_scraped }}</td>
           <td>{{ b.completed_at | datetimeformat if b.completed_at else '—' }}</td>
-          <td>
+          <td style="white-space:nowrap">
             <a href="/morning-brief?date={{ b.brief_date }}" class="btn-sm">View</a>
+            <button class="btn-sm" onclick="emailBrief({{ b.id }}, '{{ b.category_name }}')">✉</button>
           </td>
         </tr>
+        {% endfor %}
         {% endfor %}
       </tbody>
     </table>
   </div>
   {% endif %}
-
+<!-- Prompt editor modal -->
+<div id="promptModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;overflow:auto;">
+  <div style="background:#111114;border:1px solid #27272a;border-radius:12px;max-width:720px;margin:40px auto;padding:28px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+      <h3 id="promptModalTitle" style="font-size:1rem;font-weight:800;color:#fafafa;margin:0;">Edit Prompts</h3>
+      <button onclick="closePromptModal()" style="background:none;border:none;color:#71717a;font-size:1.2rem;cursor:pointer;">✕</button>
+    </div>
+    <div id="promptEditorList"></div>
+    <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn-sm" onclick="regeneratePrompts()">⚙ Regenerate All Prompts via AI</button>
+      <input type="text" id="regenDesc" placeholder="Category description for AI…"
+             style="flex:1;background:#09090b;border:1px solid #27272a;border-radius:6px;color:#fafafa;padding:6px 10px;font-size:.82rem;outline:none;min-width:200px;">
+    </div>
+  </div>
+</div>
 </div>
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
+let selectedCategoryId = null;
+let selectedCategoryName = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  const first = document.querySelector('.cat-pill.active');
+  if (first) { selectedCategoryId = parseInt(first.dataset.id); selectedCategoryName = first.dataset.name; }
+  // Initialise all panels with explicit display styles
+  document.querySelectorAll('.outer-panel').forEach(outerPanel => {
+    outerPanel.style.display = outerPanel.classList.contains('active') ? 'block' : 'none';
+
+    // Set inline display on insight panels and their container
+    outerPanel.querySelectorAll('.insight-panels').forEach(c => {
+      c.style.display = 'block';  // container always visible when outer panel is visible
+    });
+    outerPanel.querySelectorAll('.insight-panel').forEach(ip => {
+      ip.style.display = ip.classList.contains('active') ? 'block' : 'none';
+    });
+
+    const firstInsight = outerPanel.querySelector('.insight-panel.active[data-content]');
+    if (firstInsight) renderPanel(firstInsight);
+  });
+});
+
+function selectCategory(btn) {
+  document.querySelectorAll('.cat-pill').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  selectedCategoryId = parseInt(btn.dataset.id);
+  selectedCategoryName = btn.dataset.name;
+}
+
+function switchOuterTab(panelId, btn) {
+  const section = btn.closest('.brief-section');
+  section.querySelectorAll('.outer-tab').forEach(t => t.classList.remove('active'));
+  section.querySelectorAll('.outer-panel').forEach(p => {
+    p.classList.remove('active');
+    p.style.display = 'none';
+  });
+  btn.classList.add('active');
+  const panel = document.getElementById(panelId);
+  if (panel) {
+    panel.classList.add('active');
+    panel.style.display = 'block';
+    // Render the active insight tab inside this panel
+    const activeInsight = panel.querySelector('.insight-panel.active[data-content]');
+    if (activeInsight) renderPanel(activeInsight);
+  }
+}
+
 function renderPanel(panel) {
   const inner = panel.querySelector('.insight-panel-inner');
-  if (inner.innerHTML) return;  // already rendered
+  if (!inner || inner.innerHTML) return;
   let html = renderContent(panel.dataset.content || '');
-  // Linkify [Source: Title] citations using stored source map
   try {
-    const sourceMap = JSON.parse(panel.dataset.sources || '{}');
-    // Invert: sources_json is {url: title}, we need {title: url} for matching
-    const titleToUrl = {};
-    Object.entries(sourceMap).forEach(([url, title]) => { if (title) titleToUrl[title] = url; });
-    html = linkifySources(html, titleToUrl);
+    const sm = JSON.parse(panel.dataset.sources || '{}');
+    const tm = {};
+    Object.entries(sm).forEach(([url, title]) => { if (title) tm[title] = url; });
+    html = linkifySources(html, tm);
   } catch(e) {}
   inner.innerHTML = html;
 }
 
-function switchInsightTab(id, btn) {
-  document.querySelectorAll('.insight-tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.insight-panel').forEach(p => p.classList.remove('active'));
+function switchInsightTab(panelId, btn, tabsId, panelsId) {
+  // Hide all tabs and panels in this group
+  const tabContainer = document.getElementById(tabsId);
+  const panelContainer = document.getElementById(panelsId);
+  if (!tabContainer || !panelContainer) return;
+
+  tabContainer.querySelectorAll('.insight-tab').forEach(t => t.classList.remove('active'));
+  panelContainer.querySelectorAll('.insight-panel').forEach(p => {
+    p.classList.remove('active');
+    p.style.display = 'none';
+  });
+
+  // Activate clicked tab and target panel
   btn.classList.add('active');
-  const panel = document.getElementById(id);
-  panel.classList.add('active');
-  renderPanel(panel);
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  // Render first panel immediately
-  const first = document.querySelector('.insight-panel.active');
-  if (first) renderPanel(first);
-});
-
-async function runBriefNow() {
-  const btn = document.getElementById('runNowBtn');
-  btn.disabled = true; btn.textContent = 'Running…';
-  try {
-    const r = await fetch('/api/morning-brief/run', { method: 'POST' });
-    const d = await r.json();
-    if (d.status === 'started') {
-      setTimeout(() => location.reload(), 3000);
-    } else {
-      alert('Status: ' + d.status);
-      btn.disabled = false; btn.textContent = '▶ Run Now';
-    }
-  } catch(e) {
-    alert('Error: ' + e.message);
-    btn.disabled = false; btn.textContent = '▶ Run Now';
+  const panel = document.getElementById(panelId);
+  if (panel) {
+    panel.classList.add('active');
+    panel.style.display = 'block';
+    renderPanel(panel);
   }
 }
 
-function toggleBriefContent(id) {
+async function addCategory() {
+  const icon = document.getElementById('newCatIcon').value.trim() || '📰';
+  const name = document.getElementById('newCatName').value.trim();
+  const description = document.getElementById('newCatDesc').value.trim();
+  if (!name) { alert('Enter a category name.'); return; }
+  const btn = document.getElementById('addCatBtn');
+  btn.disabled = true;
+  btn.textContent = description ? '⚙ Generating prompts…' : 'Saving…';
+  const r = await fetch('/api/categories', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, icon, description }),
+  });
+  if (r.ok) {
+    if (description) {
+      // Prompts generate in background — wait briefly then reload
+      await new Promise(res => setTimeout(res, 2000));
+    }
+    location.reload();
+  } else {
+    alert('Failed: ' + (await r.json()).detail);
+    btn.disabled = false; btn.textContent = '+ Add';
+  }
+}
+
+async function deleteCategory(id, name) {
+  if (!confirm(`Delete category "${name}"? URLs assigned to it will be unassigned.`)) return;
+  const r = await fetch(`/api/categories/${id}`, { method: 'DELETE' });
+  if (r.ok) { document.getElementById(`catitem-${id}`)?.remove(); }
+  else { alert('Cannot delete builtin category.'); }
+}
+
+let _editCatId = null;
+
+async function editPrompts(catId, catName) {
+  _editCatId = catId;
+  document.getElementById('promptModalTitle').textContent = `✎ Prompts — ${catName}`;
+  document.getElementById('promptEditorList').innerHTML = '<div style="color:#71717a;font-size:.85rem;">Loading…</div>';
+  document.getElementById('promptModal').style.display = 'block';
+
+  // Load existing prompts or defaults
+  const r = await fetch(`/api/categories/${catId}/prompts`);
+  const prompts = await r.json();
+
+  // If no custom prompts, show defaults as editable
+  const defaults = [
+    {key:'trending_news', label:'📰 Top Trending News'},
+    {key:'market_outlook', label:'📈 Overview'},
+    {key:'stock_calls', label:'🎯 Key Recommendations'},
+    {key:'focus_areas', label:'🔍 Focus Areas'},
+    {key:'risk_factors', label:'⚠️ Risk Factors'},
+  ];
+
+  const source = prompts.length ? prompts : defaults;
+  const html = source.map(p => `
+    <div style="margin-bottom:14px;">
+      <div style="font-size:.75rem;color:#22d3ee;font-family:monospace;margin-bottom:4px;">
+        ${p.label || p.key}
+      </div>
+      <textarea id="prompt-${p.key}" rows="3"
+        style="width:100%;background:#09090b;border:1px solid #27272a;border-radius:6px;
+               color:#e4e4e7;font-size:.8rem;padding:8px 10px;resize:vertical;font-family:sans-serif;outline:none;"
+      >${(p.prompt_text || p.prompt || '').trim()}</textarea>
+      <div style="text-align:right;margin-top:3px;">
+        <button class="btn-sm" onclick="savePrompt(${catId},'${p.key}','${(p.label||p.key).replace(/'/g,"\'")}')">Save</button>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('promptEditorList').innerHTML = html;
+}
+
+function closePromptModal() {
+  document.getElementById('promptModal').style.display = 'none';
+}
+
+async function savePrompt(catId, key, label) {
+  const text = document.getElementById(`prompt-${key}`).value.trim();
+  if (!text) return;
+  const r = await fetch(`/api/categories/${catId}/prompts/${key}`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ label, prompt_text: text }),
+  });
+  if (r.ok) {
+    const btn = event.target;
+    btn.textContent = '✓ Saved'; btn.style.color = '#4ade80';
+    setTimeout(() => { btn.textContent = 'Save'; btn.style.color = ''; }, 1500);
+  } else { alert('Save failed'); }
+}
+
+async function regeneratePrompts() {
+  if (!_editCatId) return;
+  const desc = document.getElementById('regenDesc').value.trim();
+  if (!desc) { alert('Enter a description for the AI to use.'); return; }
+  const name = document.getElementById('promptModalTitle').textContent.replace('✎ Prompts — ','');
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = '⚙ Generating…';
+  // Delete existing custom prompts first, then re-create via category update
+  const r = await fetch('/api/categories', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, description: desc }),
+  });
+  if (r.ok) {
+    await new Promise(res => setTimeout(res, 3000));
+    await editPrompts(_editCatId, name);
+  }
+  btn.disabled = false; btn.textContent = '⚙ Regenerate All Prompts via AI';
+}
+
+async function runBriefNow() {
+  if (!selectedCategoryId) { alert('Select a category first.'); return; }
+  const btn = document.getElementById('runNowBtn');
+  btn.disabled = true; btn.textContent = `Running ${selectedCategoryName}…`;
+  try {
+    const r = await fetch('/api/morning-brief/run', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ category_id: selectedCategoryId, category_name: selectedCategoryName, force: true }),
+    });
+    const d = await r.json();
+    if (d.status === 'started') { setTimeout(() => location.reload(), 3000); }
+    else { alert('Status: ' + d.status); btn.disabled = false; btn.textContent = '▶ Run Now'; }
+  } catch(e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = '▶ Run Now'; }
+}
+
+async function emailBrief(briefId, categoryName) {
+  if (!confirm(`Email the ${categoryName} brief?`)) return;
+  try {
+    const r = await fetch(`/api/morning-brief/${briefId}/email`, { method: 'POST' });
+    const d = await r.json();
+    alert(d.status === 'sent' ? '✓ Email sent!' : 'Error: ' + JSON.stringify(d));
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function toggleBriefHtml(id) {
   const el = document.getElementById(id);
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
-
 function resizeIframe(iframe) {
-  iframe.style.height = iframe.contentDocument.body.scrollHeight + 40 + 'px';
+  try { iframe.style.height = iframe.contentDocument.body.scrollHeight + 40 + 'px'; } catch(e) {}
 }
 </script>
 {% endblock %}

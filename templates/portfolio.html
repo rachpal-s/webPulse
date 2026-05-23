@@ -116,19 +116,24 @@
     <table class="holdings-table">
       <thead>
         <tr>
-          <th>Daily</th><th>URL</th><th>Title</th><th>Type</th><th>Used</th>
+          <th>Category</th><th>URL</th><th>Title</th><th>Type</th><th>Used</th>
         </tr>
       </thead>
       <tbody>
         {% for u in url_history %}
         <tr>
-          <td style="text-align:center">
-            <button class="daily-toggle {% if u.is_daily %}active{% endif %}"
-                    data-url="{{ u.url }}"
-                    onclick="toggleDaily(this)"
-                    title="{{ 'Remove from daily' if u.is_daily else 'Add to daily' }}">
-              {{ '★' if u.is_daily else '☆' }}
-            </button>
+          <td style="text-align:center;min-width:120px">
+            <select class="cat-select" data-url="{{ u.url }}"
+                    onchange="setUrlCategory(this, '{{ u.url }}')"
+                    title="Assign to category for morning brief">
+              <option value="">— none —</option>
+              {% for cat in categories %}
+              <option value="{{ cat.id }}"
+                {% if u.category_id == cat.id %}selected{% endif %}>
+                {{ cat.icon }} {{ cat.name }}
+              </option>
+              {% endfor %}
+            </select>
           </td>
           <td><a href="{{ u.url }}" target="_blank" class="url-link">{{ u.url }}</a></td>
           <td>{{ (u.title or '')[:50] }}</td>
@@ -207,20 +212,13 @@ async function deleteHolding(id, symbol) {
   else alert('Delete failed');
 }
 
-async function toggleDaily(btn) {
-  const url = btn.dataset.url;
-  const isDaily = btn.classList.contains('active');
-  console.log('[Daily Toggle] url:', url, 'currently daily:', isDaily);
-  const r = await fetch('/api/url-daily', {
+async function setUrlCategory(sel, url) {
+  const categoryId = sel.value ? parseInt(sel.value) : null;
+  const r = await fetch('/api/url-category', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ url, is_daily: !isDaily }),
+    body: JSON.stringify({ url, category_id: categoryId }),
   });
-  console.log('[Daily Toggle] response:', r.status);
-  if (r.ok) {
-    btn.classList.toggle('active');
-    btn.textContent = btn.classList.contains('active') ? '★' : '☆';
-    btn.title = btn.classList.contains('active') ? 'Remove from daily' : 'Add to daily';
-  }
+  if (!r.ok) { alert('Failed to update category'); sel.value = ''; }
 }
 </script>
 {% endblock %}

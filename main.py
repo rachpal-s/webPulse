@@ -783,10 +783,11 @@ async def api_qa_stream(session_id: str, question: str, top_k: int = 6):
         {"role": "system", "content": (
             "You are a precise research assistant. Answer based strictly on the context provided.\n\n"
             "CITATION RULES:\n"
-            "- Every factual claim MUST be followed by a source link.\n"
+            "- Where possible, add a source citation after factual claims.\n"
             "- Citation format: [Source Title](URL) — Markdown link syntax.\n"
-            "- Extract the URL from [Source: title | URL: ...] markers in context.\n"
-            "- Never make claims without citing a source from the provided context.\n\n"
+            "- Extract the URL from [CITE AS: ...] markers in the context.\n"
+            "- If no URL is available, include the source title in brackets: [Source: Title].\n"
+            "- DO NOT refuse to answer just because you cannot cite every claim.\n\n"
             "FORMATTING RULES:\n"
             "- Always respond in clean HTML (no markdown, no triple backticks).\n"
             "- Use <table> with <thead>/<tbody>/<tr>/<th>/<td> for tabular data.\n"
@@ -832,9 +833,11 @@ async def portfolio_page(request: Request):
     store = get_store()
     holdings = store.get_portfolio()
     url_history = store.get_url_history(limit=50)
+    categories = store.get_categories()
     return templates.TemplateResponse(request, "portfolio.html", {
         "request": request, "title": cfg.app_title,
         "holdings": holdings, "url_history": url_history,
+        "categories": categories,
     })
 
 class HoldingRequest(BaseModel):
@@ -874,41 +877,182 @@ async def set_url_daily(req: UrlDailyRequest):
     get_store().set_url_daily(req.url, req.is_daily)
     return {"status": "ok"}
 
+class UrlCategoryRequest(BaseModel):
+    url: str
+    category_id: Optional[int] = None
+
+@app.post("/api/url-category")
+async def set_url_category(req: UrlCategoryRequest):
+    get_store().set_url_category(req.url, req.category_id)
+    return {"status": "ok"}
+
+class CategoryRequest(BaseModel):
+    name: str
+    icon: str = "📰"
+    color: str = "#22d3ee"
+    auto_run: bool = False
+    description: str = ""   # used to auto-generate category-specific prompts
+
+@app.get("/api/categories")
+async def list_categories():
+    return get_store().get_categories()
+
+@app.post("/api/categories")
+async def create_category(req: CategoryRequest):
+    store = get_store()
+    cat_id = store.upsert_category(
+        req.name, req.icon, req.color, req.auto_run, req.description
+    )
+    # Auto-generate prompts if description provided
+    if req.description and cat_id:
+        asyncio.create_task(_generate_category_prompts(cat_id, req.name, req.description))
+    return {"status": "ok", "id": cat_id}
+
+@app.put("/api/categories/{cat_id}/prompts/{prompt_key}")
+async def save_category_prompt(cat_id: int, prompt_key: str, payload: dict):
+    get_store().save_category_prompt(
+        cat_id, prompt_key,
+        payload.get("label", prompt_key),
+        payload.get("prompt_text", "")
+    )
+    return {"status": "ok"}
+
+@app.delete("/api/categories/{cat_id}/prompts/{prompt_key}")
+async def delete_category_prompt(cat_id: int, prompt_key: str):
+    get_store().delete_category_prompt(cat_id, prompt_key)
+    return {"status": "ok"}
+
+@app.get("/api/categories/{cat_id}/prompts")
+async def get_category_prompts(cat_id: int):
+    return get_store().get_category_prompts(cat_id)
+
+async def _generate_category_prompts(cat_id: int, name: str, description: str):
+    """Use LLM to generate 5 tailored prompts for a new category."""
+    import logging, json as _json
+    log = logging.getLogger("morning_brief")
+    try:
+        from rag.ollama import get_ollama_client
+        from jobs.morning_brief import _get_prompts
+        ollama = get_ollama_client()
+        store = get_store()
+
+        default_prompts = _get_prompts()
+        default_json = _json.dumps([{"key": p["key"], "label": p["label"], "prompt": p["prompt"]} for p in default_prompts], indent=2)
+
+        system = (
+            "You are an expert at designing AI analysis prompts. "
+            "Given a category name and description, generate 5 tailored insight prompts "
+            "adapted from the default market prompts. "
+            "Return ONLY a valid JSON array, no markdown, no explanation."
+        )
+        user = f"""Category: {name}
+Description: {description}
+
+Default prompts to adapt:
+{default_json}
+
+Generate 5 prompts tailored specifically for the '{name}' category.
+Keep the same keys and structure. Adapt the prompt text to match the category context.
+Replace market/stock/Sensex references with relevant terms for '{name}'.
+Return JSON array: [{{"key":"...","label":"...","prompt":"..."}}]"""
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        result = await ollama.chat(messages=messages, temperature=0.3, max_tokens=2048)
+        import re as _re
+        # Strip markdown code fences
+        text = _re.sub(r"```(?:json)?", "", result).strip()
+        log.info("LLM prompt response: %s", text[:200])
+        prompts = _json.loads(text)
+
+        for p in prompts:
+            # Handle both 'key' and 'prompt_key' field names from LLM
+            key = p.get("key") or p.get("prompt_key") or p.get("id") or "unknown"
+            label = p.get("label") or p.get("title") or key
+            prompt_text = p.get("prompt") or p.get("prompt_text") or p.get("text") or ""
+            if not prompt_text:
+                log.warning("Empty prompt for key %s, skipping", key)
+                continue
+            store.save_category_prompt(cat_id, key, label, prompt_text)
+            log.info("Saved prompt: %s", key)
+        log.info("Generated %d prompts for category %s", len(prompts), name)
+    except Exception as e:
+        log.warning("Prompt generation failed for %s: %s", name, e)
+
+@app.delete("/api/categories/{cat_id}")
+async def del_category(cat_id: int):
+    store = get_store()
+    cat = store.get_category(cat_id)
+    if not cat:
+        raise HTTPException(404, "Not found")
+    if cat.get("is_builtin"):
+        raise HTTPException(400, "Cannot delete builtin category")
+    store.delete_category(cat_id)
+    return {"status": "ok"}
+
 # ── Morning brief routes ──────────────────────────────────────────────────────
 
 @app.get("/morning-brief", response_class=HTMLResponse)
 async def morning_brief_page(request: Request, date: Optional[str] = None,
-                              session_id: Optional[str] = None):
+                              brief_id: Optional[int] = None):
     store = get_store()
     from datetime import date as _date
     view_date = date or _date.today().isoformat()
-    today_brief = store.get_brief(view_date)
-    insights = store.get_insights(view_date)
-    archive = store.get_recent_briefs(limit=10)
+
+    categories = store.get_categories()
+    today_briefs = store.get_briefs_by_date(view_date)
+    archive = store.get_recent_briefs(limit=30)
+
+    # Group archive by date
+    from itertools import groupby
+    archive_by_date = {}
+    for b in archive:
+        archive_by_date.setdefault(b["brief_date"], []).append(b)
+
+    # Load insights for each today brief
+    for b in today_briefs:
+        b["insights"] = store.get_insights(view_date, b["id"])
+
     from jobs.scheduler import _scheduler
     next_run = None
     if _scheduler:
         job = _scheduler.get_job("morning_brief")
         if job and job.next_run_time:
             next_run = job.next_run_time.strftime("%a %d %b %I:%M %p %Z")
+
     return templates.TemplateResponse(request, "morning_brief.html", {
         "request": request, "title": cfg.app_title,
-        "today_brief": today_brief, "insights": insights,
-        "archive": archive, "next_run": next_run, "cfg": cfg,
+        "categories": categories,
+        "today_briefs": today_briefs,
+        "archive_by_date": archive_by_date,
+        "view_date": view_date,
+        "next_run": next_run, "cfg": cfg,
         "auto_run": cfg.brief_auto_run,
     })
 
+class BriefRunRequest(BaseModel):
+    category_id: Optional[int] = None
+    category_name: Optional[str] = None
+    force: bool = True
+
+
 @app.post("/api/morning-brief/run")
-async def trigger_brief():
-    """Manually trigger the morning brief (runs in background)."""
+async def trigger_brief(req: BriefRunRequest = BriefRunRequest()):
+    """Manually trigger the morning brief for a category."""
     import asyncio, logging
     from jobs.morning_brief import run_morning_brief
     _log = logging.getLogger("morning_brief")
 
     async def _run():
-        print("[BRIEF TASK] Starting _run()", flush=True)
+        print(f"[BRIEF TASK] Starting for category_id={req.category_id}", flush=True)
         try:
-            result = await run_morning_brief(force=True)
+            result = await run_morning_brief(
+                force=req.force,
+                category_id=req.category_id,
+                category_name=req.category_name,
+            )
             print(f"[BRIEF TASK] Finished: {result}", flush=True)
             _log.info("Brief finished: %s", result)
         except Exception as e:
@@ -919,17 +1063,38 @@ async def trigger_brief():
             from rag.pipeline import get_store
             get_store().finish_brief(date.today().isoformat(), "", "", 0, str(e))
 
-    print("[BRIEF] create_task called", flush=True)
+    print(f"[BRIEF] create_task for category={req.category_id}", flush=True)
     asyncio.create_task(_run())
-    return {"status": "started"}
+    return {"status": "started", "category_id": req.category_id}
+
+
+@app.post("/api/morning-brief/{brief_id}/email")
+async def email_brief(brief_id: int):
+    """Send a specific brief by email on demand."""
+    from jobs.morning_brief import send_email
+    from datetime import date
+    store = get_store()
+    # Find brief by id
+    today = date.today().isoformat()
+    briefs = store.get_recent_briefs(limit=50)
+    brief = next((b for b in briefs if b["id"] == brief_id), None)
+    if not brief:
+        raise HTTPException(404, "Brief not found")
+    html = store.get_brief(brief["brief_date"], brief["category_id"])
+    if not html or not html.get("html_content"):
+        raise HTTPException(400, "Brief has no content")
+    subject = f"📊 {brief['category_name']} Brief — {brief['brief_date']}"
+    await send_email(subject, html["html_content"])
+    return {"status": "sent"}
 
 @app.get("/api/morning-brief/status")
 async def brief_status():
     from datetime import date as _date
     store = get_store()
     today = _date.today().isoformat()
-    brief = store.get_brief(today)
-    return brief or {"status": "not_run", "date": today}
+    briefs = store.get_briefs_by_date(today)
+    insights_counts = {b["id"]: len(store.get_insights(today, b["id"])) for b in briefs}
+    return {"date": today, "briefs": briefs, "insights_counts": insights_counts}
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
