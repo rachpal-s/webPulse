@@ -283,10 +283,17 @@ function renderContent(text) {
     '$1[Source: $2]$3'
   );
 
-  // Heuristic: contains ANY HTML tag (catches inline <a> tags mid-paragraph)
-  const looksLikeHtml = /<[a-zA-Z][^>]*>/.test(linkified);
+  // Check if content has HTML tags
+  const hasHtmlTags = /<[a-zA-Z][^>]*>/.test(linkified);
+  // Check if content also has Markdown (bold/italic/bullets)
+  const hasMd = /\*\*|\n\s*[\*\-] /.test(linkified);
 
-  if (looksLikeHtml) {
+  if (hasHtmlTags && hasMd) {
+    // Mixed: convert MD first then sanitize HTML
+    const converted = mdToHtml(linkified);
+    return sanitizeHtml(converted);
+  }
+  if (hasHtmlTags) {
     return sanitizeHtml(linkified);
   }
   return mdToHtml(linkified);

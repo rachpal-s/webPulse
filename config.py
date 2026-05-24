@@ -71,7 +71,7 @@ class Settings(BaseSettings):
         return [
             {
                 "key": "trending_news",
-                "label": "📰 Top Trending News",
+                "label": "Top Trending News",
                 "prompt": (
                     "What are the top 10 trending news stories today that may impact market dynamics? "
                     "List them as an HTML numbered list with a one-line explanation of potential market impact for each."
@@ -79,7 +79,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "market_outlook",
-                "label": "📈 India Market Outlook",
+                "label": "India Market Outlook",
                 "prompt": (
                     "Based on today's news context, how is the Indian stock market (Sensex/Nifty) likely to behave today? "
                     "Consider global cues, FII/DII activity, sector trends, and macro factors. "
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "stock_calls",
-                "label": "🎯 Expert Stock Recommendations",
+                "label": "Expert Stock Recommendations",
                 "prompt": (
                     "Based on the news context, which specific stocks have been explicitly recommended by analysts or experts? "
                     "Create an HTML table with columns: Stock, Recommendation (BUY/SELL/HOLD), Target Price (if mentioned), "
@@ -97,7 +97,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "focus_areas",
-                "label": "🔍 Focus Areas Today",
+                "label": "Focus Areas Today",
                 "prompt": (
                     "Based on today's news, what are the key focus areas, themes, or sectors that investors should watch today? "
                     "Include: sectors in spotlight, key events or data releases, geopolitical factors, and any earnings announcements. "
@@ -106,7 +106,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "risk_factors",
-                "label": "⚠️ Risk Factors & Caution Zones",
+                "label": "Risk Factors & Caution Zones",
                 "prompt": (
                     "Based on today's news context, what are the key risk factors or caution zones for the market today? "
                     "Include global risks, domestic concerns, overvalued sectors, or stocks facing headwinds. "

@@ -5,6 +5,24 @@
 <div class="page-brief">
 <script>
 // resizeIframe defined inline above
+
+// Sort archive table by completed date
+let _sortAsc = false;
+function sortArchive() {
+  const tbody = document.getElementById('archiveTbody');
+  if (!tbody) return;
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    const aT = a.querySelector('td:nth-child(5)')?.textContent.trim() || '';
+    const bT = b.querySelector('td:nth-child(5)')?.textContent.trim() || '';
+    return _sortAsc ? aT.localeCompare(bT) : bT.localeCompare(aT);
+  });
+  rows.forEach(r => tbody.appendChild(r));
+  _sortAsc = !_sortAsc;
+  document.getElementById('sortBtn').textContent = _sortAsc ? '↑ Oldest First' : '↓ Newest First';
+}
+// Auto-sort on load
+document.addEventListener('DOMContentLoaded', () => { sortArchive(); sortArchive(); });
 </script>
 
   <div class="brief-page-header">
@@ -166,10 +184,13 @@
   <!-- Archive -->
   {% if archive_by_date %}
   <div class="brief-archive">
-    <h3>Archive</h3>
-    <table class="holdings-table">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <h3 style="margin:0">Archive</h3>
+      <button class="btn-sm" onclick="sortArchive()" id="sortBtn">↓ Newest First</button>
+    </div>
+    <table class="holdings-table" id="archiveTable">
       <thead><tr><th>Date</th><th>Category</th><th>Status</th><th>Articles</th><th>Completed</th><th></th></tr></thead>
-      <tbody>
+      <tbody id="archiveTbody">
         {% for date_str, briefs in archive_by_date.items() %}
         {% for b in briefs %}
         <tr>
@@ -260,6 +281,11 @@ function switchOuterTab(panelId, btn) {
 function renderPanel(panel) {
   const inner = panel.querySelector('.insight-panel-inner');
   if (!inner || inner.innerHTML) return;
+  // Guard: renderContent may not be loaded yet
+  if (typeof renderContent !== 'function') {
+    setTimeout(() => renderPanel(panel), 100);
+    return;
+  }
   let html = renderContent(panel.dataset.content || '');
   try {
     const sm = JSON.parse(panel.dataset.sources || '{}');
