@@ -37,7 +37,7 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
             font-size: .82rem; font-weight: 500; transition: all .15s; }
 .nav-link:hover { color: var(--text); background: var(--surface2); }
 .nav-link.active { color: var(--accent); background: var(--glow); }
-.header-badge { font-family: var(--font-mono); font-size: .6rem; padding: 3px 8px;
+.header-badge { display: none;font-family: var(--font-mono); font-size: .6rem; padding: 3px 8px;
                 border: 1px solid var(--border2); border-radius: 4px; color: var(--muted);
                 margin-left: auto; letter-spacing: .05em; }
 
@@ -86,7 +86,7 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .extract-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ── Strategy pills ── */
-.strategy-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+.strategy-row { display: none; flex-wrap: wrap; gap: 8px; align-items: center;
                 margin-bottom: 10px; }
 .strategy-label { font-family: var(--font-mono); font-size: .68rem; color: var(--muted);
                   letter-spacing: .04em; margin-right: 4px; }
@@ -881,6 +881,7 @@ tr.filter-dim:hover .hl-hc-section { color: var(--accent2); }
   text-decoration: none; color: var(--text);
   transition: border-color .15s, background .15s, transform .15s;
   cursor: pointer;
+  height: 82px;
 }
 .quick-card:hover {
   border-color: var(--accent);
