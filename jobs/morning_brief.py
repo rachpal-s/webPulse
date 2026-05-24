@@ -154,9 +154,132 @@ async def run_morning_brief(force: bool = False,
             try:
                 return await _full_scrape(url, strategies=strategies)
             except Exception as e:
-                # HTTPException or network error — log and return None
                 log.warning("_scrape_url %s: %s", url, e)
                 return None
+
+        # ── Build prompts early — needed for relevance filter ────────────────
+        cat_prompts_raw = store.get_category_prompts(category_id)
+        cat_prompts = [
+            {"key": p["prompt_key"], "label": p["label"], "prompt": p["prompt_text"]}
+            for p in cat_prompts_raw
+            if p.get("prompt_key") and p["prompt_key"] not in ("undefined", "unknown", "")
+            and p.get("prompt_text")
+        ] if cat_prompts_raw else []
+        is_market = category_name.lower() in ("markets", "market", "finance", "stocks")
+        if cat_prompts:
+            prompts_to_run = cat_prompts
+        else:
+            prompts_to_run = []
+            for dp in _get_prompts():
+                p = dict(dp)
+                if not is_market:
+                    p["prompt"] = (
+                        p["prompt"]
+                        .replace("today's news", f"today's {category_name} news")
+                        .replace("Indian stock market (Sensex/Nifty)", f"{category_name} domain")
+                        .replace("Indian stock market", f"{category_name} landscape")
+                        .replace("stocks have been explicitly recommended by analysts or experts",
+                                 f"topics or entities highlighted by experts in {category_name}")
+                        .replace("Stock, Recommendation (BUY/SELL/HOLD), Target Price (if mentioned), Analyst/Source, and Key Reason",
+                                 f"Topic, View (Positive/Negative/Neutral), Source, Key Reason")
+                        .replace("FII/DII activity, sector trends, and macro factors",
+                                 f"key developments, trends, and influencing factors")
+                        .replace("bullish, bearish, or range-bound",
+                                 f"positive, negative, or neutral")
+                        .replace("Sensex/Nifty", category_name)
+                    )
+                else:
+                    p["prompt"] = p["prompt"].replace("today's news", f"today's {category_name} news")
+                prompts_to_run.append(p)
+
+        # ── Consume from pre-populated URL queue ─────────────────────────────────
+        queued = store.get_queued_urls(
+            category_id,
+            max_age_hours=cfg.crawl_window_hours,
+            limit=cfg.crawl_top_n * len(daily_urls)
+        )
+        print(f"[BRIEF] URL queue: {len(queued)} pre-crawled articles for {category_name}", flush=True)
+
+        fallback_urls: list[str] = []
+
+        if queued:
+            # Scrape pre-filtered queue articles directly
+            used_urls = []
+            for q in queued:
+                try:
+                    art = await asyncio.wait_for(
+                        _scrape_url(q["url"],
+                            strategies=["trafilatura","newspaper3k","readability"]),
+                        timeout=30)
+                    if art and len((art.content or "").split()) > 50:
+                        all_documents.append({
+                            "url": q["url"],
+                            "title": art.title or q["title"] or q["url"],
+                            "content": art.content,
+                            "page_type": "article",
+                        })
+                        used_urls.append(q["url"])
+                    else:
+                        log.debug("Thin content: %s", q["url"])
+                except Exception as e:
+                    log.debug("Scrape %s: %s", q["url"], e)
+
+            # Mark consumed articles as used
+            if used_urls:
+                store.mark_queue_used(used_urls, category_id)
+            log.info("Queue consumed: %d articles scraped", len(all_documents))
+
+            # Check which source domains had no queue items → homepage fallback
+            queued_sources = {q["source_url"] for q in queued}
+            fallback_urls = [u["url"] for u in daily_urls
+                             if u["url"] not in queued_sources]
+            if fallback_urls:
+                print(f"[BRIEF] No queue for {fallback_urls} → homepage fallback", flush=True)
+        else:
+            # Queue empty — run live crawl + filter for all domains
+            print(f"[BRIEF] Queue empty → live crawl + relevance filter", flush=True)
+            from scraper.crawler import discover_recent_pages
+            from scraper.relevance import build_category_intent_vector, filter_by_relevance
+            intent_vector = await build_category_intent_vector(prompts_to_run, ollama)
+            for url_rec in daily_urls:
+                domain_url = url_rec["url"]
+                try:
+                    crawled = await asyncio.wait_for(
+                        discover_recent_pages(domain_url,
+                            window_hours=cfg.crawl_window_hours,
+                            max_results=cfg.crawl_max_results),
+                        timeout=30)
+                    if not crawled:
+                        fallback_urls.append(domain_url); continue
+                    relevant, had_match = await filter_by_relevance(
+                        crawled, intent_vector, ollama,
+                        min_score=cfg.crawl_min_score, top_n=cfg.crawl_top_n)
+                    if not had_match:
+                        fallback_urls.append(domain_url); continue
+                    for page in relevant:
+                        try:
+                            art = await asyncio.wait_for(
+                                _scrape_url(page.url,
+                                    strategies=["trafilatura","newspaper3k","readability"]),
+                                timeout=30)
+                            if art and len((art.content or "").split()) > 50:
+                                all_documents.append({
+                                    "url": page.url,
+                                    "title": art.title or page.title or page.url,
+                                    "content": art.content, "page_type": "article",
+                                })
+                        except Exception as e:
+                            log.debug("Scrape %s: %s", page.url, e)
+                except Exception as e:
+                    log.warning("Live crawl %s: %s", domain_url, e)
+                    fallback_urls.append(domain_url)
+
+        # Domains not served by queue/crawl → existing homepage scrape
+        daily_urls = [u for u in daily_urls if u["url"] in fallback_urls]
+        if daily_urls:
+            print(f"[BRIEF] Homepage fallback for {len(daily_urls)} domains", flush=True)
+        else:
+            print(f"[BRIEF] All domains served by queue/crawler", flush=True)
 
         for url_rec in daily_urls:
             url = url_rec["url"]
@@ -273,43 +396,7 @@ async def run_morning_brief(force: bool = False,
         )
 
         # ── Step 8: Save + send ────────────────────────────────────────────────
-        # ── Step 7b: Category-aware insight prompts ──────────────────────────────
-        cat_prompts_raw = store.get_category_prompts(category_id)
-        # Normalise DB rows to same shape as default prompts: {key, label, prompt}
-        cat_prompts = [
-            {"key": p["prompt_key"], "label": p["label"], "prompt": p["prompt_text"]}
-            for p in cat_prompts_raw
-            if p.get("prompt_key") and p["prompt_key"] not in ("undefined", "unknown", "")
-            and p.get("prompt_text")
-        ] if cat_prompts_raw else []
-
-        is_market = category_name.lower() in ("markets", "market", "finance", "stocks")
-        if cat_prompts:
-            prompts_to_run = cat_prompts
-        else:
-            prompts_to_run = []
-            for dp in _get_prompts():
-                p = dict(dp)
-                if not is_market:
-                    p["prompt"] = (
-                        p["prompt"]
-                        .replace("today's news", f"today's {category_name} news")
-                        .replace("Indian stock market (Sensex/Nifty)", f"{category_name} domain")
-                        .replace("Indian stock market", f"{category_name} landscape")
-                        .replace("stocks have been explicitly recommended by analysts or experts",
-                                 f"topics or entities highlighted by experts in {category_name}")
-                        .replace("Stock, Recommendation (BUY/SELL/HOLD), Target Price (if mentioned), Analyst/Source, and Key Reason",
-                                 f"Topic, View (Positive/Negative/Neutral), Source, Key Reason")
-                        .replace("FII/DII activity, sector trends, and macro factors",
-                                 f"key developments, trends, and influencing factors")
-                        .replace("bullish, bearish, or range-bound",
-                                 f"positive, negative, or neutral")
-                        .replace("Sensex/Nifty", category_name)
-                    )
-                else:
-                    p["prompt"] = p["prompt"].replace("today's news", f"today's {category_name} news")
-                prompts_to_run.append(p)
-
+        # ── Step 7b: prompts_to_run built above — reused here
         log.info("Running %d prompts for %s", len(prompts_to_run), category_name)
         print(f"[BRIEF] Running {len(prompts_to_run)} prompts for {category_name}", flush=True)
         print(f"[BRIEF] RAG session: {session_id} | mode: {rag_ctx.mode} | chunks: {rag_ctx.chunk_count}", flush=True)

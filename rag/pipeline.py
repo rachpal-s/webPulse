@@ -652,6 +652,75 @@ class VectorStore:
 
 # ── Chunker ────────────────────────────────────────────────────────────────────
 
+
+    # ── URL Queue methods ─────────────────────────────────────────────────────
+
+    def upsert_queue_urls(self, category_id: int, source_url: str, pages: list[dict]):
+        import time as _time
+        conn = self._connect()
+        now = _time.time()
+        for p in pages:
+            conn.execute("""
+                INSERT INTO url_queue
+                    (url,category_id,source_url,title,summary,relevance_score,discovered_at,status)
+                VALUES (?,?,?,?,?,?,?,'pending')
+                ON CONFLICT(url,category_id) DO UPDATE SET
+                    title=excluded.title,summary=excluded.summary,
+                    relevance_score=excluded.relevance_score,
+                    discovered_at=excluded.discovered_at,status='pending'
+            """, (p["url"],category_id,source_url,
+                  p.get("title",""),p.get("summary",""),p.get("score",0),now))
+        conn.commit()
+        conn.close()
+
+    def get_queued_urls(self, category_id: int,
+                         max_age_hours: int = 6, limit: int = 30) -> list[dict]:
+        import time as _time
+        cutoff = _time.time() - max_age_hours * 3600
+        conn = self._connect()
+        rows = conn.execute("""
+            SELECT * FROM url_queue
+            WHERE category_id=? AND status='pending' AND discovered_at>?
+            ORDER BY relevance_score DESC, discovered_at DESC LIMIT ?
+        """, (category_id, cutoff, limit)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_queue_preview(self, max_age_hours: int = 6) -> list[dict]:
+        import time as _time
+        cutoff = _time.time() - max_age_hours * 3600
+        conn = self._connect()
+        rows = conn.execute("""
+            SELECT q.*,c.name as category_name,c.icon as category_icon
+            FROM url_queue q JOIN brief_categories c ON q.category_id=c.id
+            WHERE q.status='pending' AND q.discovered_at>?
+            ORDER BY q.category_id, q.relevance_score DESC
+        """, (cutoff,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def mark_queue_used(self, urls: list[str], category_id: int):
+        conn = self._connect()
+        for url in urls:
+            conn.execute("UPDATE url_queue SET status='used' WHERE url=? AND category_id=?",
+                         (url,category_id))
+        conn.commit(); conn.close()
+
+    def exclude_queue_url(self, url: str, category_id: int):
+        conn = self._connect()
+        conn.execute("UPDATE url_queue SET status='excluded' WHERE url=? AND category_id=?",
+                     (url,category_id))
+        conn.commit(); conn.close()
+
+    def clear_old_queue(self, max_age_hours: int = 24) -> int:
+        import time as _time
+        cutoff = _time.time() - max_age_hours * 3600
+        conn = self._connect()
+        n = conn.execute("DELETE FROM url_queue WHERE discovered_at<?", (cutoff,)).rowcount
+        conn.commit(); conn.close()
+        return n
+
+
 class AdaptiveChunker:
     """
     Two-phase chunking:
@@ -998,4 +1067,4 @@ async def query(
         sources_used=sources_used,
         latency_ms=(time.perf_counter() - t0) * 1000,
         chunks_retrieved=chunks_used,
-    )
+    )    # ── URL Queue methods ──────────────────────────────────────────────────────────

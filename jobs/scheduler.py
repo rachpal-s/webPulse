@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-
+import asyncio
 from config import get_settings
 
 log = logging.getLogger("scheduler")
@@ -43,7 +43,14 @@ async def startup_catchup():
     """
     Called at app startup. If auto_run enabled and scheduled run was missed
     (machine was down), run immediately.
+    Also triggers initial queue refresh.
     """
+    # Always run queue refresh on startup if enabled
+    if cfg.crawl_queue_enabled:
+        from jobs.queue_crawler import refresh_queue
+        log.info("Startup: running initial queue refresh")
+        asyncio.create_task(refresh_queue(force=True))
+
     if not cfg.brief_auto_run:
         log.info("Startup catchup skipped — BRIEF_AUTO_RUN=false")
         return
@@ -72,11 +79,36 @@ async def startup_catchup():
         log.info("Startup catchup: brief already done for today")
 
 
+async def _run_queue_refresh():
+    from jobs.queue_crawler import refresh_queue
+    log.info("Queue refresh triggered")
+    result = await refresh_queue()
+    log.info("Queue refresh: %s", result.get("status"))
+
+
 def start_scheduler():
     global _scheduler
 
     tz = cfg.brief_timezone
     _scheduler = AsyncIOScheduler(timezone=tz)
+
+    # Queue crawler job
+    if cfg.crawl_queue_enabled:
+        _scheduler.add_job(
+            _run_queue_refresh,
+            "interval",
+            minutes=cfg.crawl_queue_interval_mins,
+            id="queue_crawler",
+            name="URL Queue Refresh",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+        log.info("Queue crawler: every %d min, window %d-%dh",
+                 cfg.crawl_queue_interval_mins,
+                 cfg.crawl_queue_start_hour,
+                 cfg.crawl_queue_end_hour)
+    else:
+        log.info("Queue crawler disabled (CRAWL_QUEUE_ENABLED=false)")
 
     if cfg.brief_auto_run:
         h, m = map(int, cfg.brief_start_time.split(":"))

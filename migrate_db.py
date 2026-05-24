@@ -161,5 +161,27 @@ if orphans:
     conn.commit()
     print(f"Cleaned {orphans} orphaned insights (brief_id=NULL)")
 
+# ── Create url_queue table ───────────────────────────────────────────────────
+print()
+print("Creating url_queue table...")
+conn.executescript("""
+    CREATE TABLE IF NOT EXISTS url_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT NOT NULL,
+        category_id INTEGER NOT NULL,
+        source_url TEXT DEFAULT '',
+        title TEXT DEFAULT '',
+        summary TEXT DEFAULT '',
+        relevance_score REAL DEFAULT 0,
+        discovered_at REAL NOT NULL,
+        status TEXT DEFAULT 'pending',
+        UNIQUE(url, category_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_queue_cat
+        ON url_queue(category_id, status, discovered_at);
+""")
+conn.commit()
+print("  OK  url_queue created")
+
 print("\nDone. Restart the app.")
 conn.close()

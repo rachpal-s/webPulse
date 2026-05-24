@@ -66,6 +66,22 @@
     </div>
   </div>
 
+  <!-- URL Queue preview -->
+  <div class="queue-panel" id="queuePanel">
+    <div class="queue-header">
+      <div>
+        <span class="queue-title">🕷 Pre-crawled Article Queue</span>
+        <span class="queue-subtitle" id="queueSubtitle">Loading…</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span id="queueCount" class="insights-badge" style="display:none"></span>
+        <button class="btn-sm" onclick="refreshQueue()" id="queueRefreshBtn">↻ Refresh</button>
+        <button class="btn-sm" onclick="toggleQueue()">▾ Hide</button>
+      </div>
+    </div>
+    <div id="queueBody" class="queue-body"></div>
+  </div>
+
   <!-- Today's briefs -->
   {% if today_briefs %}
   <div class="brief-section">
@@ -382,6 +398,94 @@ async function regeneratePrompts() {
   }
   btn.disabled = false; btn.textContent = '⚙ Regenerate All Prompts via AI';
 }
+
+// ── URL Queue ─────────────────────────────────────────────────────────────────
+let _queueVisible = true;
+
+async function loadQueue() {
+  try {
+    const r = await fetch('/api/queue?hours=6');
+    const d = await r.json();
+    const cats = d.categories || {};
+    const total = d.total || 0;
+
+    document.getElementById('queueSubtitle').textContent =
+      `Last 6h · ${total} articles ready`;
+    const badge = document.getElementById('queueCount');
+    badge.textContent = total + ' queued';
+    badge.style.display = total ? 'inline-block' : 'none';
+
+    if (total === 0) {
+      document.getElementById('queueBody').innerHTML =
+        '<div style="padding:14px 20px;color:var(--muted);font-size:.82rem;">' +
+        'No articles in queue yet. Queue refreshes every ' +
+        '{{ cfg.crawl_queue_interval_mins }} min. ' +
+        '<button class="link-btn" onclick="refreshQueue()">Refresh now</button></div>';
+      return;
+    }
+
+    let html = '';
+    for (const [catName, cat] of Object.entries(cats)) {
+      html += `<div class="queue-cat-group">
+        <div class="queue-cat-label">${cat.icon} ${catName}
+          <span style="color:var(--muted);font-size:.7rem;margin-left:6px">${cat.items.length} articles</span>
+        </div>
+        <div class="queue-items">`;
+      for (const item of cat.items) {
+        const score = Math.round(item.relevance_score * 100);
+        const age = item.discovered_at
+          ? Math.round((Date.now()/1000 - item.discovered_at) / 60) + 'min ago'
+          : '';
+        html += `<div class="queue-item" id="qi-${item.id}">
+          <div class="queue-item-score">${score}%</div>
+          <div class="queue-item-body">
+            <a href="${item.url}" target="_blank" class="queue-item-title">${item.title || item.url}</a>
+            <div class="queue-item-meta">${item.source_url} · ${age}</div>
+          </div>
+          <button class="cat-del-btn" title="Exclude"
+            onclick="excludeQueueItem(${item.id},'${item.url}',${cat.category_id})">✕</button>
+        </div>`;
+      }
+      html += '</div></div>';
+    }
+    document.getElementById('queueBody').innerHTML = html;
+  } catch(e) {
+    document.getElementById('queueBody').innerHTML =
+      '<div style="padding:14px;color:var(--err);font-size:.82rem;">Failed to load queue: ' + e.message + '</div>';
+  }
+}
+
+async function refreshQueue() {
+  const btn = document.getElementById('queueRefreshBtn');
+  btn.disabled = true; btn.textContent = '↻ Refreshing…';
+  try {
+    await fetch('/api/queue/refresh', {method:'POST'});
+    await new Promise(r => setTimeout(r, 3000));
+    await loadQueue();
+  } finally {
+    btn.disabled = false; btn.textContent = '↻ Refresh';
+  }
+}
+
+async function excludeQueueItem(id, url, categoryId) {
+  await fetch('/api/queue/exclude', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url, category_id: categoryId}),
+  });
+  document.getElementById('qi-' + id)?.remove();
+}
+
+function toggleQueue() {
+  const body = document.getElementById('queueBody');
+  _queueVisible = !_queueVisible;
+  body.style.display = _queueVisible ? 'block' : 'none';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadQueue();
+  // Auto-refresh queue display every 2 min
+  setInterval(loadQueue, 120000);
+});
 
 async function runBriefNow() {
   if (!selectedCategoryId) { alert('Select a category first.'); return; }

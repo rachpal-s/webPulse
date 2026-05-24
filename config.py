@@ -53,13 +53,25 @@ class Settings(BaseSettings):
     brief_prompts_json: str = ""             # JSON override for DEFAULT_PROMPTS; empty = use defaults
     brief_default_category: str = "Markets"  # category name for auto-run scheduler
 
+    # URL Queue / Background crawler
+    crawl_queue_enabled: bool = True         # enable background crawl queue refresh
+    crawl_queue_interval_mins: int = 45      # how often to refresh (minutes)
+    crawl_queue_start_hour: int = 6          # start crawling at this hour (local tz)
+    crawl_queue_end_hour: int = 21           # stop crawling after this hour
+
+    # Crawler settings
+    crawl_window_hours: int = 4          # how far back to look for recent pages
+    crawl_max_results: int = 50          # max URLs fetched from sitemap/RSS before filtering
+    crawl_top_n: int = 15               # how many to scrape after relevance filtering
+    crawl_min_score: float = 0.70       # minimum embedding similarity score to include
+
     @property
     def brief_default_prompts(self) -> list[dict]:
         """Default insight prompts for morning brief. Override via BRIEF_PROMPTS_JSON."""
         return [
             {
                 "key": "trending_news",
-                "label": "Top Trending News",
+                "label": "📰 Top Trending News",
                 "prompt": (
                     "What are the top 10 trending news stories today that may impact market dynamics? "
                     "List them as an HTML numbered list with a one-line explanation of potential market impact for each."
@@ -67,7 +79,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "market_outlook",
-                "label": "India Market Outlook",
+                "label": "📈 India Market Outlook",
                 "prompt": (
                     "Based on today's news context, how is the Indian stock market (Sensex/Nifty) likely to behave today? "
                     "Consider global cues, FII/DII activity, sector trends, and macro factors. "
@@ -76,7 +88,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "stock_calls",
-                "label": "Expert Stock Recommendations",
+                "label": "🎯 Expert Stock Recommendations",
                 "prompt": (
                     "Based on the news context, which specific stocks have been explicitly recommended by analysts or experts? "
                     "Create an HTML table with columns: Stock, Recommendation (BUY/SELL/HOLD), Target Price (if mentioned), "
@@ -85,7 +97,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "focus_areas",
-                "label": "Focus Areas Today",
+                "label": "🔍 Focus Areas Today",
                 "prompt": (
                     "Based on today's news, what are the key focus areas, themes, or sectors that investors should watch today? "
                     "Include: sectors in spotlight, key events or data releases, geopolitical factors, and any earnings announcements. "
@@ -94,7 +106,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "risk_factors",
-                "label": "Risk Factors & Caution Zones",
+                "label": "⚠️ Risk Factors & Caution Zones",
                 "prompt": (
                     "Based on today's news context, what are the key risk factors or caution zones for the market today? "
                     "Include global risks, domestic concerns, overvalued sectors, or stocks facing headwinds. "
