@@ -193,14 +193,16 @@ async def run_morning_brief(force: bool = False,
                 prompts_to_run.append(p)
 
         # ── Consume from pre-populated URL queue ─────────────────────────────────
-        queued = store.get_queued_urls(
-            category_id,
-            max_age_hours=cfg.crawl_window_hours,
-            limit=cfg.crawl_top_n * len(daily_urls)
-        )
-        print(f"[BRIEF] URL queue: {len(queued)} pre-crawled articles for {category_name}", flush=True)
-
         fallback_urls: list[str] = []
+        queued = []
+
+        if cfg.crawl_queue_enabled and hasattr(store, 'get_queued_urls'):
+            queued = store.get_queued_urls(
+                category_id,
+                max_age_hours=cfg.crawl_window_hours,
+                limit=cfg.crawl_top_n * len(daily_urls)
+            )
+        print(f"[BRIEF] URL queue: {len(queued)} pre-crawled articles for {category_name}", flush=True)
 
         if queued:
             # Scrape pre-filtered queue articles directly
@@ -225,7 +227,7 @@ async def run_morning_brief(force: bool = False,
                     log.debug("Scrape %s: %s", q["url"], e)
 
             # Mark consumed articles as used
-            if used_urls:
+            if used_urls and hasattr(store, 'mark_queue_used'):
                 store.mark_queue_used(used_urls, category_id)
             log.info("Queue consumed: %d articles scraped", len(all_documents))
 
@@ -236,43 +238,48 @@ async def run_morning_brief(force: bool = False,
             if fallback_urls:
                 print(f"[BRIEF] No queue for {fallback_urls} → homepage fallback", flush=True)
         else:
-            # Queue empty — run live crawl + filter for all domains
-            print(f"[BRIEF] Queue empty → live crawl + relevance filter", flush=True)
-            from scraper.crawler import discover_recent_pages
-            from scraper.relevance import build_category_intent_vector, filter_by_relevance
-            intent_vector = await build_category_intent_vector(prompts_to_run, ollama)
-            for url_rec in daily_urls:
-                domain_url = url_rec["url"]
-                try:
-                    crawled = await asyncio.wait_for(
-                        discover_recent_pages(domain_url,
-                            window_hours=cfg.crawl_window_hours,
-                            max_results=cfg.crawl_max_results),
-                        timeout=30)
-                    if not crawled:
-                        fallback_urls.append(domain_url); continue
-                    relevant, had_match = await filter_by_relevance(
-                        crawled, intent_vector, ollama,
-                        min_score=cfg.crawl_min_score, top_n=cfg.crawl_top_n)
-                    if not had_match:
-                        fallback_urls.append(domain_url); continue
-                    for page in relevant:
-                        try:
-                            art = await asyncio.wait_for(
-                                _scrape_url(page.url,
-                                    strategies=["trafilatura","newspaper3k","readability"]),
-                                timeout=30)
-                            if art and len((art.content or "").split()) > 50:
-                                all_documents.append({
-                                    "url": page.url,
-                                    "title": art.title or page.title or page.url,
-                                    "content": art.content, "page_type": "article",
-                                })
-                        except Exception as e:
-                            log.debug("Scrape %s: %s", page.url, e)
-                except Exception as e:
-                    log.warning("Live crawl %s: %s", domain_url, e)
-                    fallback_urls.append(domain_url)
+            # Queue empty — if crawler enabled do live crawl, else go straight to homepage scrape
+            if cfg.crawl_queue_enabled:
+                print(f"[BRIEF] Queue empty → live crawl + relevance filter", flush=True)
+                from scraper.crawler import discover_recent_pages
+                from scraper.relevance import build_category_intent_vector, filter_by_relevance
+                intent_vector = await build_category_intent_vector(prompts_to_run, ollama)
+                for url_rec in daily_urls:
+                    domain_url = url_rec["url"]
+                    try:
+                        crawled = await asyncio.wait_for(
+                            discover_recent_pages(domain_url,
+                                window_hours=cfg.crawl_window_hours,
+                                max_results=cfg.crawl_max_results),
+                            timeout=30)
+                        if not crawled:
+                            fallback_urls.append(domain_url); continue
+                        relevant, had_match = await filter_by_relevance(
+                            crawled, intent_vector, ollama,
+                            min_score=cfg.crawl_min_score, top_n=cfg.crawl_top_n)
+                        if not had_match:
+                            fallback_urls.append(domain_url); continue
+                        for page in relevant:
+                            try:
+                                art = await asyncio.wait_for(
+                                    _scrape_url(page.url,
+                                        strategies=["trafilatura","newspaper3k","readability"]),
+                                    timeout=30)
+                                if art and len((art.content or "").split()) > 50:
+                                    all_documents.append({
+                                        "url": page.url,
+                                        "title": art.title or page.title or page.url,
+                                        "content": art.content, "page_type": "article",
+                                    })
+                            except Exception as e:
+                                log.debug("Scrape %s: %s", page.url, e)
+                    except Exception as e:
+                        log.warning("Live crawl %s: %s", domain_url, e)
+                        fallback_urls.append(domain_url)
+            else:
+                # Crawler disabled — all domains use homepage scrape
+                print(f"[BRIEF] Crawler disabled → homepage scrape for all domains", flush=True)
+                fallback_urls = [u["url"] for u in daily_urls]
 
         # Domains not served by queue/crawl → existing homepage scrape
         daily_urls = [u for u in daily_urls if u["url"] in fallback_urls]

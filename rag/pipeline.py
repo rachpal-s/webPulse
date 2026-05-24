@@ -72,7 +72,7 @@ class VectorStore:
 
     def _connect(self) -> sqlite3.Connection:
         import sqlite_vec
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
@@ -236,6 +236,15 @@ class VectorStore:
 
     def save_chunks(self, session_id: str, chunks: list[Chunk]):
         conn = self._connect()
+        # vec0 virtual table doesn't support INSERT OR REPLACE
+        # Delete existing vector entries for this session before re-inserting
+        old_ids = [r[0] for r in conn.execute(
+            "SELECT chunk_id FROM chunks WHERE session_id=?", (session_id,)
+        ).fetchall()]
+        if old_ids:
+            conn.execute("DELETE FROM chunks WHERE session_id=?", (session_id,))
+            conn.commit()
+
         for chunk in chunks:
             conn.execute("""
                 INSERT OR REPLACE INTO chunks
@@ -652,7 +661,6 @@ class VectorStore:
 
 # ── Chunker ────────────────────────────────────────────────────────────────────
 
-
     # ── URL Queue methods ─────────────────────────────────────────────────────
 
     def upsert_queue_urls(self, category_id: int, source_url: str, pages: list[dict]):
@@ -807,14 +815,15 @@ def _infer_section(text: str) -> str:
 
 
 def _make_chunk_id(url: str, idx: int) -> str:
-    h = hashlib.md5(f"{url}::{idx}".encode()).hexdigest()[:12]
+    import time as _time
+    h = hashlib.md5(f"{url}::{idx}::{_time.time()}".encode()).hexdigest()[:12]
     return f"chunk_{h}_{idx}"
 
 
 def _make_session_id(urls: list[str]) -> str:
-    combined = "|".join(sorted(urls))
+    import time as _time
+    combined = "|".join(sorted(urls)) + f"|{_time.time()}"
     return hashlib.md5(combined.encode()).hexdigest()[:16]
-
 
 # ── Main RAG pipeline ─────────────────────────────────────────────────────────
 
@@ -1036,8 +1045,9 @@ async def query(
         "CITATION RULES:\n"
         "- Where possible, add a source citation after factual claims.\n"
         "- Citation format: [Source Title](URL) — Markdown link syntax.\n"
-        "- Extract the URL from [CITE AS: ...] markers in the context.\n"
-        "- If no URL is available, include the source title in brackets: [Source: Title].\n"
+        "- Use the URL from [CITE AS: title](url) markers in the context.\n"
+        "- Write citations as: [Short Title](URL) — keep link text brief, max 6 words.\n"
+        "- Do NOT include 'CITE AS:' in your output — just write the Markdown link.\n"
         "- DO NOT refuse to answer just because you cannot cite every claim.\n\n"
         "FORMATTING RULES:\n"
         "- Always respond in clean HTML (no markdown, no triple backticks).\n"

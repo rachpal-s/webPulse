@@ -272,14 +272,19 @@ function renderContent(text) {
   const stripped = text.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/, '').trim();
 
   // Convert markdown links [text](url) → <a> even when response is otherwise HTML
-  const linkified = stripped.replace(
+  let linkified = stripped.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
   );
 
-  // Heuristic: if it starts with a block-level HTML tag it's HTML
-  const looksLikeHtml = /^<(p|table|ul|ol|h[1-6]|div|section|blockquote|pre|strong|em)\b/i.test(linkified)
-    || (linkified.includes('</') && linkified.match(/<\/(p|td|tr|li|h[1-6])>/i));
+  // Clean "CITE AS: [title]" inside anchor text → readable [Source: title]
+  linkified = linkified.replace(
+    /(<a [^>]+>)CITE AS: \[([^\]]+)\](<\/a>)/g,
+    '$1[Source: $2]$3'
+  );
+
+  // Heuristic: contains ANY HTML tag (catches inline <a> tags mid-paragraph)
+  const looksLikeHtml = /<[a-zA-Z][^>]*>/.test(linkified);
 
   if (looksLikeHtml) {
     return sanitizeHtml(linkified);

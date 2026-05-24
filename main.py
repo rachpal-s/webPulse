@@ -785,8 +785,9 @@ async def api_qa_stream(session_id: str, question: str, top_k: int = 6):
             "CITATION RULES:\n"
             "- Where possible, add a source citation after factual claims.\n"
             "- Citation format: [Source Title](URL) — Markdown link syntax.\n"
-            "- Extract the URL from [CITE AS: ...] markers in the context.\n"
-            "- If no URL is available, include the source title in brackets: [Source: Title].\n"
+            "- Use the URL from [CITE AS: title](url) markers in the context.\n"
+            "- Write citations as: [Short Title](URL) — keep link text brief, max 6 words.\n"
+            "- Do NOT include 'CITE AS:' in your output — just write the Markdown link.\n"
             "- DO NOT refuse to answer just because you cannot cite every claim.\n\n"
             "FORMATTING RULES:\n"
             "- Always respond in clean HTML (no markdown, no triple backticks).\n"
@@ -1097,6 +1098,64 @@ async def brief_status():
     return {"date": today, "briefs": briefs, "insights_counts": insights_counts}
 
 # ── Health ────────────────────────────────────────────────────────────────────
+
+# ── URL Queue endpoints ───────────────────────────────────────────────────────
+
+@app.get("/api/queue")
+async def get_queue(hours: int = 6):
+    """Get pre-crawled URL queue grouped by category."""
+    store = get_store()
+    items = store.get_queue_preview(max_age_hours=hours)
+    # Group by category
+    grouped: dict = {}
+    for item in items:
+        key = item["category_name"]
+        if key not in grouped:
+            grouped[key] = {"icon": item["category_icon"],
+                            "category_id": item["category_id"], "items": []}
+        grouped[key]["items"].append(item)
+    return {"hours": hours, "total": len(items), "categories": grouped}
+
+@app.post("/api/queue/refresh")
+async def trigger_queue_refresh():
+    """Manually trigger queue refresh."""
+    import asyncio
+    from jobs.queue_crawler import refresh_queue
+    asyncio.create_task(refresh_queue(force=True))
+    return {"status": "started"}
+
+@app.post("/api/queue/exclude")
+async def exclude_queue_url(payload: dict):
+    get_store().exclude_queue_url(payload["url"], payload["category_id"])
+    return {"status": "ok"}
+
+@app.post("/api/crawl")
+async def crawl_domain(payload: dict):
+    """Discover recently published pages on a domain."""
+    from scraper.crawler import discover_recent_pages
+    url = payload.get("url", "")
+    window_hours = int(payload.get("window_hours", 6))
+    max_results = int(payload.get("max_results", 30))
+    if not url:
+        raise HTTPException(400, "url required")
+    pages = await discover_recent_pages(url, window_hours=window_hours,
+                                         max_results=max_results)
+    return {
+        "url": url,
+        "window_hours": window_hours,
+        "total": len(pages),
+        "source": pages[0].source if pages else "none",
+        "pages": [
+            {
+                "url": p.url, "title": p.title,
+                "published": p.published.isoformat() if p.published else None,
+                "score": round(p.score, 3),
+                "summary": p.summary,
+                "source": p.source,
+            }
+            for p in pages
+        ]
+    }
 
 @app.get("/api/health")
 async def health():
