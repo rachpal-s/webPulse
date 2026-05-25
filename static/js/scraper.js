@@ -1,5 +1,110 @@
 /* static/js/scraper.js */
 
+// ── Hover card position config ────────────────────────────────────────────────
+// ANCHOR: which corner of the card pins to the row
+//   "bottom-left"  — card appears below-left of row  (default)
+//   "bottom-right" — card appears below-right of row
+//   "top-left"     — card appears above-left of row
+//   "top-right"    — card appears above-right of row
+// CORNER: which screen corner to pin the card to (overrides ANCHOR if set)
+//   null           — use ANCHOR relative to row
+//   "top-left"     — always top-left of viewport
+//   "top-right"    — always top-right of viewport
+//   "bottom-left"  — always bottom-left of viewport
+//   "bottom-right" — always bottom-right of viewport
+// SHAPE: "wide" (680px default) | "square" (420×420px) | "narrow" (360px)
+const HOVER_CARD_ANCHOR = "top-right";
+const HOVER_CARD_CORNER = null;
+const HOVER_CARD_SHAPE  = "wide";
+// ─────────────────────────────────────────────────────────────────────────────
+
+function applyHoverCardConfig() {
+  const root = document.documentElement;
+  const shapes = {
+    wide:   { width: "680px", height: "auto",  overflow: "auto" },
+    square: { width: "420px", height: "420px", overflow: "auto" },
+    narrow: { width: "360px", height: "auto",  overflow: "auto" },
+  };
+  const shape = shapes[HOVER_CARD_SHAPE] || shapes.wide;
+  root.style.setProperty("--hc-width",    shape.width);
+  root.style.setProperty("--hc-height",   shape.height);
+  root.style.setProperty("--hc-overflow", shape.overflow);
+}
+
+// ── Single floating card appended to <body> ───────────────────────────────────
+let _hcEl = null;
+
+function _getCard() {
+  if (!_hcEl) {
+    _hcEl = document.createElement("div");
+    _hcEl.className = "hl-hover-card";
+    document.body.appendChild(_hcEl);
+  }
+  return _hcEl;
+}
+
+function showHoverCard(row, html) {
+  const card = _getCard();
+  card.innerHTML = html;
+  card.classList.add("hc-visible");
+  _positionCard(card, row);
+}
+
+function hideHoverCard() {
+  if (_hcEl) _hcEl.classList.remove("hc-visible");
+}
+
+function _positionCard(card, row) {
+  const W = card.offsetWidth  || parseInt(getComputedStyle(document.documentElement).getPropertyValue("--hc-width")) || 680;
+  const H = card.offsetHeight || 300;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const PAD = 16;
+
+  if (HOVER_CARD_CORNER) {
+    // Fixed corner of viewport
+    const isTop   = HOVER_CARD_CORNER.includes("top");
+    const isRight = HOVER_CARD_CORNER.includes("right");
+    card.style.top    = isTop    ? PAD + "px" : "auto";
+    card.style.bottom = isTop    ? "auto"     : PAD + "px";
+    card.style.left   = isRight  ? "auto"     : PAD + "px";
+    card.style.right  = isRight  ? PAD + "px" : "auto";
+  } else {
+    // Position relative to the hovered row
+    const rect = row.getBoundingClientRect();
+    const isTop   = HOVER_CARD_ANCHOR.startsWith("top");
+    const isRight = HOVER_CARD_ANCHOR.endsWith("right");
+
+    let top  = isTop  ? rect.top  - H - 8 : rect.bottom + 8;
+    let left = isRight ? rect.right - W    : rect.left;
+
+    // Clamp to viewport
+    top  = Math.max(PAD, Math.min(top,  vh - H - PAD));
+    left = Math.max(PAD, Math.min(left, vw - W - PAD));
+
+    card.style.top   = top  + "px";
+    card.style.left  = left + "px";
+    card.style.right = "auto";
+    card.style.bottom = "auto";
+  }
+}
+
+// Wire mouseenter/mouseleave to all hl-rows (delegated on document)
+document.addEventListener("mouseover", e => {
+  const row = e.target.closest("tr.hl-row");
+  if (!row) return;
+  const inner = row.querySelector(".hl-hover-card");
+  if (!inner) return;
+  showHoverCard(row, inner.innerHTML);
+});
+document.addEventListener("mouseout", e => {
+  const row = e.target.closest("tr.hl-row");
+  if (row && !row.contains(e.relatedTarget)) hideHoverCard();
+});
+
+// Apply on load
+document.addEventListener("DOMContentLoaded", applyHoverCardConfig);
+
 let currentData = null;
 let currentContent = '';
 let currentView = 'rendered';
@@ -133,10 +238,6 @@ async function startScrape() {
     if (!resp.ok) throw new Error((await resp.json()).detail || `HTTP ${resp.status}`);
 
     currentData = await resp.json();
-    console.log('[WebPulse] page_type:', currentData.page_type,
-                '| headlines:', currentData.headlines?.length,
-                '| tables_md:', !!currentData.tables_md,
-                '| content_len:', (currentData.content||'').length);
 
     if (currentData.multi_results?.length > 1) {
       renderMultiResults(currentData);
