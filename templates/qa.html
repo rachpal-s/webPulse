@@ -39,11 +39,14 @@
         <div class="sidebar-title" style="margin-top:20px">Sources</div>
         <ul class="source-list">
           {% for src in session.sources %}
-          <li class="source-item">
+          <li class="source-item" style="display:flex;align-items:center;gap:4px;">
             <a href="{{ src.url }}" target="_blank" class="source-link"
-               title="{{ src.url }}">
+               title="{{ src.url }}" style="flex:1;min-width:0;">
               {{ src.title or src.url }}
             </a>
+            <button class="add-to-session-btn"
+              onclick="addToSession('{{ src.url | e }}', event)"
+              title="Add full content to session">+</button>
           </li>
           {% endfor %}
         </ul>
@@ -59,7 +62,7 @@
         <div class="sidebar-title">Settings</div>
         <div class="setting-row">
           <label class="setting-label">Top-K chunks</label>
-          <input class="adv-input" id="topK" type="number" value="6" min="1" max="20">
+          <input class="adv-input" id="topK" type="number" value="12" min="1" max="30">
         </div>
         <div class="setting-row" style="margin-top:8px">
           <label class="setting-label">Stream response</label>
@@ -117,5 +120,32 @@
 <script>
   const SESSION_ID = "{{ session_id or '' }}";
 </script>
-<script src="/static/js/qa.js?v={{ ver }}"></script>
+<script src="/static/js/qa.js?v={{ ver }}">
+async function addToSession(url, event) {
+  event.stopPropagation();
+  const sid = new URLSearchParams(window.location.search).get('session_id');
+  if (!sid) { alert('No active session.'); return; }
+  const btn = event.target;
+  const orig = btn.textContent;
+  btn.textContent = '⟳'; btn.disabled = true;
+  try {
+    const r = await fetch(`/api/session/${sid}/add-url`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ url }),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      btn.textContent = '✓'; btn.style.color = '#4ade80';
+      btn.title = `Added: ${d.chunks} chunks, ${d.words} words`;
+    } else {
+      btn.textContent = '✗'; btn.style.color = '#f87171';
+      btn.title = d.detail || 'Failed';
+      setTimeout(() => { btn.textContent=orig; btn.style.color=''; btn.disabled=false; }, 2000);
+    }
+  } catch(e) {
+    btn.textContent = '!'; btn.style.color = '#f87171';
+    setTimeout(() => { btn.textContent=orig; btn.style.color=''; btn.disabled=false; }, 2000);
+  }
+}
+</script>
 {% endblock %}

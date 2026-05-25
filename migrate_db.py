@@ -183,5 +183,19 @@ conn.executescript("""
 conn.commit()
 print("  OK  url_queue created")
 
+# ── Create chunk_embeddings table (replaces vec0 chunk_vectors) ──────────────
+print()
+print("Creating chunk_embeddings table...")
+conn.executescript("""
+    CREATE TABLE IF NOT EXISTS chunk_embeddings (
+        chunk_id TEXT PRIMARY KEY,
+        embedding BLOB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_emb
+        ON chunk_embeddings(chunk_id);
+""")
+conn.commit()
+print("  OK  chunk_embeddings created")
+
 print("\nDone. Restart the app.")
 conn.close()

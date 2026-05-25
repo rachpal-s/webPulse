@@ -768,16 +768,38 @@ async def api_qa_stream(session_id: str, question: str, top_k: int = 6):
             for c in chunks
         )
     else:
+        # Always load chunks from persistent SQLite first
+        chunks = store.get_all_chunks(session_id)
         try:
             q_emb = await ollama.embed([question])
             relevant = store.similarity_search(session_id, q_emb[0], top_k=top_k)
-            context_text = "\n\n---\n\n".join(
-                f"[{r['source_title']} | {r.get('section','')}]\n{r['content']}"
-                for r in relevant
-            )
+            if relevant:
+                context_text = "\n\n---\n\n".join(
+                    f"[CITE AS: [{r['source_title']}]({r['source_url']}) | {r.get('section','')}]\n{r['content']}"
+                    for r in relevant
+                )
+            else:
+                raise Exception("similarity_search returned 0")
         except Exception:
-            chunks = store.get_all_chunks(session_id)
-            context_text = "\n\n".join(c["content"] for c in chunks[:top_k])
+            # Keyword fallback against pre-loaded chunks
+            keywords = set(question.lower().split())
+            scored = []
+            for idx, c in enumerate(chunks):
+                score = sum(1 for kw in keywords if kw in c["content"].lower())
+                if score > 0:
+                    scored.append((score, idx, c))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            # Supplement sparse results with unscored chunks
+            if len(scored) < top_k:
+                scored_urls = {c["source_url"] for _, _, c in scored}
+                extra = [c for c in chunks if c["source_url"] not in scored_urls]
+                top = [c for _, _, c in scored] + extra[:top_k - len(scored)]
+            else:
+                top = [c for _, _, c in scored[:top_k]]
+            context_text = "\n\n---\n\n".join(
+                f"[Source: {c['source_title'] or c['source_url']}]\n{c['content']}"
+                for c in top
+            )
 
     messages = [
         {"role": "system", "content": (
@@ -1155,6 +1177,112 @@ async def crawl_domain(payload: dict):
             }
             for p in pages
         ]
+    }
+
+@app.post("/api/session/{session_id}/add-url")
+async def add_url_to_session(session_id: str, payload: dict):
+    """Scrape a URL and add its content to an existing RAG session."""
+    from scraper.engine import scrape
+    from rag.pipeline import get_store, get_chunker, ingest_documents
+    from rag.ollama import get_ollama_client
+    import struct
+
+    url = payload.get("url", "").strip()
+    if not url:
+        raise HTTPException(400, "url required")
+
+    store = get_store()
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "session not found")
+
+    try:
+        # Scrape the URL
+        result = await scrape(url, strategies=["trafilatura","newspaper3k","readability"])
+        if not result or not result.content:
+            raise HTTPException(422, "Could not extract content from URL")
+
+        content = result.content
+        title = result.title or url
+        words = len(content.split())
+
+        # Chunk the content
+        chunker = get_chunker()
+        ollama = get_ollama_client()
+        import asyncio as _aio
+
+        doc_chunks = await _aio.get_event_loop().run_in_executor(
+            None, chunker.chunk_document,
+            content, url, title, "article", session["mode"]
+        )
+
+        # Embed and save
+        texts = [c.content for c in doc_chunks]
+        embeddings = await ollama.embed(texts)
+        for chunk, emb in zip(doc_chunks, embeddings):
+            chunk.embedding = emb
+
+        conn = store._connect()
+        for chunk in doc_chunks:
+            conn.execute("""
+                INSERT OR REPLACE INTO chunks
+                (chunk_id,session_id,source_url,source_title,content,
+                 word_count,chunk_index,total_chunks,section,page_type)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, (chunk.chunk_id, session_id, url, title, chunk.content,
+                  chunk.word_count, chunk.chunk_index, chunk.total_chunks,
+                  chunk.section, chunk.page_type))
+            if chunk.embedding:
+                import struct as _struct
+                serialized = _struct.pack(f"{len(chunk.embedding)}f", *chunk.embedding)
+                try:
+                    conn.execute("INSERT OR REPLACE INTO chunk_embeddings (chunk_id,embedding) VALUES (?,?)",
+                                 (chunk.chunk_id, serialized))
+                except Exception:
+                    pass
+        conn.commit()
+
+        # Update session sources
+        sources = session.get("sources", [])
+        if not any(s["url"] == url for s in sources):
+            sources.append({"url": url, "title": title})
+            conn.execute("UPDATE sessions SET sources=? WHERE session_id=?",
+                         (__import__("json").dumps(sources), session_id))
+            conn.commit()
+        conn.close()
+
+        return {"status": "ok", "url": url, "title": title,
+                "chunks": len(doc_chunks), "words": words}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/session/{session_id}/debug")
+async def debug_session(session_id: str):
+    """Show what chunks are stored for a session."""
+    store = get_store()
+    session = store.get_session(session_id)
+    chunks = store.get_all_chunks(session_id)
+    import sqlite3
+    conn = sqlite3.connect(cfg.db_path, timeout=30)
+    vec_count = 0
+    try:
+        vec_count = conn.execute(
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id IN "
+            "(SELECT chunk_id FROM chunks WHERE session_id=?)", (session_id,)
+        ).fetchone()[0]
+    except Exception as e:
+        vec_count = f"error: {e}"
+    conn.close()
+    return {
+        "session": session,
+        "chunk_count": len(chunks),
+        "vec_count": vec_count,
+        "chunks": [{"id": c["chunk_id"], "source": c["source_title"],
+                    "words": c["word_count"], "preview": c["content"][:80]}
+                   for c in chunks[:10]]
     }
 
 @app.get("/api/health")

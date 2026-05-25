@@ -22,7 +22,7 @@ function sortArchive() {
   document.getElementById('sortBtn').textContent = _sortAsc ? '↑ Oldest First' : '↓ Newest First';
 }
 // Auto-sort on load
-document.addEventListener('DOMContentLoaded', () => { sortArchive(); sortArchive(); });
+
 </script>
 
   <div class="brief-page-header">
@@ -40,7 +40,12 @@ document.addEventListener('DOMContentLoaded', () => { sortArchive(); sortArchive
   </div>
 
   <!-- Run panel -->
-  <div class="run-panel">
+  <div class="run-panel collapsible-section" id="section-run">
+    <div class="section-header" onclick="toggleSection('run')">
+      <span class="section-header-title">▶ Run Brief</span>
+      <span class="section-toggle-icon" id="icon-run">▾</span>
+    </div>
+    <div class="section-body" id="body-run">
     <div class="run-panel-inner">
       <div class="run-label">Run Brief For:</div>
       <div class="category-pills" id="categoryPills">
@@ -84,20 +89,22 @@ document.addEventListener('DOMContentLoaded', () => { sortArchive(); sortArchive
     </div>
   </div>
 
+  </div><!-- /section-body-run -->
+
   <!-- URL Queue preview -->
   <div class="queue-panel" id="queuePanel">
-    <div class="queue-header">
+    <div class="queue-header section-header" onclick="toggleSection('queue')" style="cursor:pointer">
       <div>
         <span class="queue-title">🕷 Pre-crawled Article Queue</span>
-        <span class="queue-subtitle" id="queueSubtitle">Loading…</span>
+        <span class="queue-subtitle" id="queueSubtitle"></span>
       </div>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <div style="display:flex;gap:8px;align-items:center;" onclick="event.stopPropagation()">
         <span id="queueCount" class="insights-badge" style="display:none"></span>
         <button class="btn-sm" onclick="refreshQueue()" id="queueRefreshBtn">↻ Refresh</button>
-        <button class="btn-sm" onclick="toggleQueue()">▾ Hide</button>
+        <span class="section-toggle-icon" id="icon-queue" style="pointer-events:none">▾</span>
       </div>
     </div>
-    <div id="queueBody" class="queue-body"></div>
+    <div id="body-queue" class="section-body queue-body"></div>
   </div>
 
   <!-- Today's briefs -->
@@ -183,11 +190,15 @@ document.addEventListener('DOMContentLoaded', () => { sortArchive(); sortArchive
 
   <!-- Archive -->
   {% if archive_by_date %}
-  <div class="brief-archive">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+  <div class="brief-archive collapsible-section" id="section-archive">
+    <div class="section-header" onclick="toggleSection('archive')" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;cursor:pointer">
       <h3 style="margin:0">Archive</h3>
-      <button class="btn-sm" onclick="sortArchive()" id="sortBtn">↓ Newest First</button>
+      <div style="display:flex;gap:8px;" onclick="event.stopPropagation()">
+        <button class="btn-sm" onclick="sortArchive()" id="sortBtn">↓ Newest First</button>
+        <span class="section-toggle-icon" id="icon-archive" style="pointer-events:none;padding:4px 8px">▾</span>
+      </div>
     </div>
+    <div class="section-body" id="body-archive">
     <table class="holdings-table" id="archiveTable">
       <thead><tr><th>Date</th><th>Category</th><th>Status</th><th>Articles</th><th>Completed</th><th></th></tr></thead>
       <tbody id="archiveTbody">
@@ -208,6 +219,7 @@ document.addEventListener('DOMContentLoaded', () => { sortArchive(); sortArchive
         {% endfor %}
       </tbody>
     </table>
+    </div><!-- /section-body-archive -->
   </div>
   {% endif %}
 <!-- Prompt editor modal -->
@@ -425,6 +437,42 @@ async function regeneratePrompts() {
   btn.disabled = false; btn.textContent = '⚙ Regenerate All Prompts via AI';
 }
 
+// ── Section collapse with localStorage persistence ───────────────────────────
+const SECTION_DEFAULTS = { run: true, queue: false, archive: false };
+const PREF_KEY = 'wb_sections';
+
+function _loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; }
+  catch { return {}; }
+}
+function _savePrefs(prefs) {
+  try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch {}
+}
+
+function toggleSection(id) {
+  const body = document.getElementById('body-' + id);
+  const icon = document.getElementById('icon-' + id);
+  if (!body) return;
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  if (icon) icon.textContent = isOpen ? '▸' : '▾';
+  const prefs = _loadPrefs();
+  prefs[id] = !isOpen;
+  _savePrefs(prefs);
+}
+
+function initSections() {
+  const prefs = _loadPrefs();
+  for (const [id, defaultOpen] of Object.entries(SECTION_DEFAULTS)) {
+    const isOpen = prefs.hasOwnProperty(id) ? prefs[id] : defaultOpen;
+    const body = document.getElementById('body-' + id);
+    const icon = document.getElementById('icon-' + id);
+    if (!body) continue;
+    body.style.display = isOpen ? 'block' : 'none';
+    if (icon) icon.textContent = isOpen ? '▾' : '▸';
+  }
+}
+
 // ── URL Queue ─────────────────────────────────────────────────────────────────
 let _queueVisible = true;
 
@@ -442,7 +490,7 @@ async function loadQueue() {
     badge.style.display = total ? 'inline-block' : 'none';
 
     if (total === 0) {
-      document.getElementById('queueBody').innerHTML =
+      document.getElementById('body-queue').innerHTML =
         '<div style="padding:14px 20px;color:var(--muted);font-size:.82rem;">' +
         'No articles in queue yet. Queue refreshes every ' +
         '{{ cfg.crawl_queue_interval_mins }} min. ' +
@@ -474,9 +522,9 @@ async function loadQueue() {
       }
       html += '</div></div>';
     }
-    document.getElementById('queueBody').innerHTML = html;
+    document.getElementById('body-queue').innerHTML = html;
   } catch(e) {
-    document.getElementById('queueBody').innerHTML =
+    document.getElementById('body-queue').innerHTML =
       '<div style="padding:14px;color:var(--err);font-size:.82rem;">Failed to load queue: ' + e.message + '</div>';
   }
 }
@@ -508,9 +556,10 @@ function toggleQueue() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  initSections();
   loadQueue();
-  // Auto-refresh queue display every 2 min
   setInterval(loadQueue, 120000);
+  sortArchive(); sortArchive();  // sort archive descending on load
 });
 
 async function runBriefNow() {

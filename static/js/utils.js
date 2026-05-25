@@ -39,7 +39,7 @@ function mdToHtml(text) {
       .replace(/\*(.+?)\*/g, '<em>$1</em>')
       .replace(/_(.+?)_/g, '<em>$1</em>')
       .replace(/`(.+?)`/g, '<code class="md-inline-code">$1</code>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
         '<a href="$2" target="_blank" class="md-link">$1</a>');
   }
 
@@ -282,6 +282,14 @@ function renderContent(text) {
     /(<a [^>]+>)CITE AS: \[([^\]]+)\](<\/a>)/g,
     '$1[Source: $2]$3'
   );
+
+  // Remove LLM artifacts: "— Markdown link." and "— Markdown link" suffixes
+  linkified = linkified.replace(/\s*—\s*Markdown link\.?/g, '');
+
+  // Fix raw <a href="..."> tags rendered as text (LLM put HTML in text context)
+  // If we find &lt;a href= patterns, unescape them
+  linkified = linkified.replace(/&lt;a href="([^"]+)"[^&]*&gt;([^&]*)&lt;\/a&gt;/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer">$2</a>');
 
   // Check if content has HTML tags
   const hasHtmlTags = /<[a-zA-Z][^>]*>/.test(linkified);

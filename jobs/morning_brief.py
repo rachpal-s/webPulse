@@ -411,12 +411,14 @@ async def run_morning_brief(force: bool = False,
             try:
                 print(f"[BRIEF] Prompt key : {dp['key']}", flush=True)
                 print(f"[BRIEF] Prompt text: {dp['prompt'][:200]}…", flush=True)
-                ins_result = await rag_query(session_id, dp["prompt"], top_k=8)
+                ins_result = await rag_query(session_id, dp["prompt"], top_k=12)
                 if not ins_result.answer or len(ins_result.answer.strip()) < 20:
                     log.warning("Empty answer for %s — retrying with top_k=20", dp["key"])
                     ins_result = await rag_query(session_id, dp["prompt"], top_k=20)
+                # If still empty, save a placeholder rather than blank
+                answer = ins_result.answer if ins_result.answer and len(ins_result.answer.strip()) > 20                     else f"<p style='color:var(--muted);font-style:italic'>No relevant information found in today\'s {category_name} articles for this insight.</p>"
                 store.save_insight(today, dp["key"], dp["label"],
-                                   ins_result.answer, ins_result.sources_used,
+                                   answer, ins_result.sources_used,
                                    brief_id=brief_id)
                 log.info("Insight done: %s (len=%d) preview: %s",
                           dp["key"], len(ins_result.answer),
