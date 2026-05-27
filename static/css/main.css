@@ -86,7 +86,7 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
 .extract-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ── Strategy pills ── */
-.strategy-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+.strategy-row { display: none; flex-wrap: wrap; gap: 8px; align-items: center;
                 margin-bottom: 10px; }
 .strategy-label { font-family: var(--font-mono); font-size: .68rem; color: var(--muted);
                   letter-spacing: .04em; margin-right: 4px; }

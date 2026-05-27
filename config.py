@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     crawl_queue_start_hour: int = 6          # start crawling at this hour (local tz)
     crawl_queue_end_hour: int = 21           # stop crawling after this hour
 
+    # Embedding provider
+    embed_provider: str = "ollama"          # "ollama" | "google" | "openai" | "cohere"
+    google_api_key: str = ""                # Google Generative AI API key
+    google_embed_model: str = "gemini-embedding-001"  # recommended, replaces text-embedding-004
+    openai_api_key: str = ""
+    openai_embed_model: str = "text-embedding-3-small"
+    cohere_api_key: str = ""
+    cohere_embed_model: str = "embed-english-v3.0"
+    jina_api_key: str = ""
+    jina_embed_model: str = "jina-embeddings-v3"  # 65.5 MTEB, 1024 dims, free tier
+
     # Crawler settings
     crawl_window_hours: int = 4          # how far back to look for recent pages
     crawl_max_results: int = 50          # max URLs fetched from sitemap/RSS before filtering
@@ -71,7 +82,7 @@ class Settings(BaseSettings):
         return [
             {
                 "key": "trending_news",
-                "label": "Top Trending News",
+                "label": "📰 Top Trending News",
                 "prompt": (
                     "What are the top 10 trending news stories today that may impact market dynamics? "
                     "List them as an HTML numbered list with a one-line explanation of potential market impact for each."
@@ -79,7 +90,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "market_outlook",
-                "label": "India Market Outlook",
+                "label": "📈 India Market Outlook",
                 "prompt": (
                     "Based on today's news context, how is the Indian stock market (Sensex/Nifty) likely to behave today? "
                     "Consider global cues, FII/DII activity, sector trends, and macro factors. "
@@ -88,7 +99,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "stock_calls",
-                "label": "Expert Stock Recommendations",
+                "label": "🎯 Expert Stock Recommendations",
                 "prompt": (
                     "Based on the news context, which specific stocks have been explicitly recommended by analysts or experts? "
                     "Create an HTML table with columns: Stock, Recommendation (BUY/SELL/HOLD), Target Price (if mentioned), "
@@ -97,7 +108,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "focus_areas",
-                "label": "Focus Areas Today",
+                "label": "🔍 Focus Areas Today",
                 "prompt": (
                     "Based on today's news, what are the key focus areas, themes, or sectors that investors should watch today? "
                     "Include: sectors in spotlight, key events or data releases, geopolitical factors, and any earnings announcements. "
@@ -106,7 +117,7 @@ class Settings(BaseSettings):
             },
             {
                 "key": "risk_factors",
-                "label": "Risk Factors & Caution Zones",
+                "label": "⚠️ Risk Factors & Caution Zones",
                 "prompt": (
                     "Based on today's news context, what are the key risk factors or caution zones for the market today? "
                     "Include global risks, domestic concerns, overvalued sectors, or stocks facing headwinds. "

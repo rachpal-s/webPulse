@@ -349,15 +349,20 @@ function renderContent(text) {
 
   // Check if content has HTML tags
   const hasHtmlTags = /<[a-zA-Z][^>]*>/.test(linkified);
-  // Check if content also has Markdown (bold/italic/bullets)
-  const hasMd = /\*\*|\n\s*[\*\-] /.test(linkified);
+  // Check if content has Markdown (bold/bullets/tables/headers)
+  // Use separator row pattern (|---|) to detect MD tables — avoids false positives from HTML
+  const hasMd = /\*\*|\n\s*[\*\-] |\|\s*[-:]+[-:\s|]+\s*\|/.test(linkified);
 
   let result;
   if (hasHtmlTags && hasMd) {
+    // Mixed HTML + Markdown — convert MD first then sanitize
     result = sanitizeHtml(mdToHtml(linkified));
   } else if (hasHtmlTags) {
+    // Pure HTML — sanitize only, don't run through mdToHtml
+    // (mdToHtml breaks raw <table>, <ol> etc by treating them as text)
     result = sanitizeHtml(linkified);
   } else {
+    // Pure Markdown
     result = mdToHtml(linkified);
   }
   return fixRawAnchorsInHtml(result);

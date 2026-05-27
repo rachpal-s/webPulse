@@ -319,13 +319,35 @@ async def run_morning_brief(force: bool = False,
 
                 # ── Step 3: Dig into top articles ─────────────────────────────
                 if headlines:
-                    log.info("  Digging %d articles from %s", len(headlines), url)
-                    for h in headlines:
+                    # Filter out non-article URLs before digging
+                    import re as _re
+                    SKIP_PATTERNS = _re.compile(
+                        r'/(calculator|tool|tools|widget|subscription|login|register|'
+                        r'portfolio|watchlist|account|profile|tag|tags|author|'
+                        r'sitemap|rss|feed|privacy|terms|about|contact|advertis)/',
+                        _re.IGNORECASE
+                    )
+                    ARTICLE_PATTERNS = _re.compile(
+                        r'/(news|article|story|market|stock|economy|business|finance|'
+                        r'world|india|politics|companies|results|ipo|mutual-fund)/',
+                        _re.IGNORECASE
+                    )
+                    news_headlines = [
+                        h for h in headlines
+                        if not SKIP_PATTERNS.search(h["url"])
+                        and (ARTICLE_PATTERNS.search(h["url"]) or
+                             any(kw in h.get("title","").lower()
+                                 for kw in ["nifty","sensex","stock","market","rupee",
+                                            "rbi","sebi","ipo","share","fund","economy"]))
+                    ]
+                    log.info("  Digging %d/%d articles from %s",
+                             len(news_headlines), len(headlines), url)
+                    for h in news_headlines:
                         try:
                             art = await asyncio.wait_for(
                                 _scrape_url(h["url"],
                                     strategies=["trafilatura","newspaper3k","readability"]),
-                                timeout=30
+                                timeout=20  # tighter timeout per article
                             )
                             if art:
                                 art_content = art.content or ""

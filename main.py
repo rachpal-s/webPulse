@@ -2,6 +2,9 @@
 WebPulse — Multi-Strategy Scraper + Adaptive RAG
 FastAPI app with Jinja2 templates
 """
+# Load .env into os.environ so all modules see live values (not just Pydantic cache)
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(override=True)
 import asyncio
 import time
 from pathlib import Path
@@ -770,8 +773,20 @@ async def api_qa_stream(session_id: str, question: str, top_k: int = 6):
     else:
         # Always load chunks from persistent SQLite first
         chunks = store.get_all_chunks(session_id)
+        # Use session's original embed provider for query
+        _sess_provider = (session.get("embed_provider") or "ollama").lower()
+        import os as _os3
+        _curr_provider = _os3.environ.get("EMBED_PROVIDER", cfg.embed_provider).lower()
+        if _sess_provider != _curr_provider:
+            _orig_p = cfg.embed_provider
+            object.__setattr__(cfg, "embed_provider", _sess_provider)
+            from rag.ollama import OllamaClient as _OC2
+            _q_client = _OC2()
+            object.__setattr__(cfg, "embed_provider", _orig_p)
+        else:
+            _q_client = ollama
         try:
-            q_emb = await ollama.embed([question])
+            q_emb = await _q_client.embed([question])
             relevant = store.similarity_search(session_id, q_emb[0], top_k=top_k)
             if relevant:
                 context_text = "\n\n---\n\n".join(
@@ -825,6 +840,17 @@ async def api_qa_stream(session_id: str, question: str, top_k: int = 6):
          f"Context:\n{context_text}\n\nQuestion: {question}\n\nAnswer:"},
     ]
 
+    import logging as _log
+    _log.getLogger("qa").info(
+        "Q&A context: %d chars, mode=%s, chunks=%d",
+        len(context_text), mode, len(context_text.split("---"))
+    )
+    if not context_text.strip():
+        async def event_stream():
+            yield "data: <p style='color:#f87171'>No context available for this session. Please re-scrape the URLs.</p>\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
     async def event_stream():
         async for token in ollama.chat_stream(messages):
             # SSE spec: multi-line data is sent as multiple "data:" lines per event.
@@ -837,6 +863,45 @@ async def api_qa_stream(session_id: str, question: str, top_k: int = 6):
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+
+# ── Embed provider API ───────────────────────────────────────────────────────
+@app.get("/api/embed-provider")
+async def get_embed_provider():
+    """Return current embed provider and available options."""
+    import os as _os
+    from rag.ollama import OllamaClient
+    current = _os.environ.get("EMBED_PROVIDER", cfg.embed_provider).lower()
+    # Single source of truth — dims come from OllamaClient._PROVIDER_DIMS
+    _meta = {
+        "ollama": {"label": "Ollama (local)", "free": True},
+        "jina":   {"label": "Jina AI",        "free": True},
+        "google": {"label": "Google Gemini",  "free": True},
+        "openai": {"label": "OpenAI",         "free": False},
+        "cohere": {"label": "Cohere",         "free": True},
+    }
+    providers = [
+        {"id": pid, "label": m["label"],
+         "dims": OllamaClient.dims_for_provider(pid), "free": m["free"]}
+        for pid, m in _meta.items()
+    ]
+    return {
+        "current": current,
+        "dims": OllamaClient.dims_for_provider(current),
+        "providers": providers,
+    }
+
+@app.post("/api/embed-provider/{provider}")
+async def set_embed_provider(provider: str):
+    """Switch embed provider at runtime."""
+    import os as _os
+    from rag.ollama import OllamaClient
+    valid = {"ollama", "jina", "google", "openai", "cohere"}
+    if provider not in valid:
+        from fastapi import HTTPException
+        raise HTTPException(400, f"Invalid provider. Choose from: {valid}")
+    _os.environ["EMBED_PROVIDER"] = provider
+    dims = OllamaClient.dims_for_provider(provider)
+    return {"ok": True, "provider": provider, "dims": dims}
 
 # ── API: Ollama health ────────────────────────────────────────────────────────
 

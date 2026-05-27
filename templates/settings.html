@@ -148,9 +148,77 @@
 
   </div>
 
-  <!-- <div class="settings-footer">
+  <!-- ── Embed Provider Switcher ──────────────────────────────────────────── -->
+  <div class="settings-card" style="margin-top:24px;max-width:520px">
+    <div class="settings-card-header">
+      <div class="settings-card-title">🔀 Embedding Provider</div>
+      <div class="settings-card-subtitle">Switch at runtime — no restart needed</div>
+    </div>
+    <div class="settings-rows" style="padding:16px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <select id="embedProviderSelect"
+                style="background:var(--surface2);color:var(--text);border:1px solid var(--border);
+                       border-radius:8px;padding:8px 12px;font-size:14px;min-width:200px;cursor:pointer">
+          <option value="">Loading...</option>
+        </select>
+        <span id="embedDimsLabel"
+              style="color:var(--muted);font-size:13px;font-family:monospace"></span>
+        <span id="embedProviderStatus" style="font-size:13px"></span>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin-top:10px">
+        ⚠ Switching provider mid-session creates dimension mismatch for existing sessions.
+        New sessions will use the selected provider automatically.
+      </p>
+    </div>
+  </div>
+
+  <div class="settings-footer">
     <p>To change any value, edit <code>.env</code> and restart: <code>uvicorn main:app --reload --port 8000</code></p>
-  </div> -->
+  </div>
+
+<script>
+(async () => {
+  const sel = document.getElementById('embedProviderSelect');
+  const dims = document.getElementById('embedDimsLabel');
+  const status = document.getElementById('embedProviderStatus');
+
+  // Load current state
+  try {
+    const r = await fetch('/api/embed-provider');
+    const data = await r.json();
+
+    // Populate options
+    sel.innerHTML = data.providers.map(p =>
+      `<option value="${p.id}" ${p.id === data.current ? 'selected' : ''}>
+        ${p.label} (${p.dims}d)${p.free ? ' ★' : ''}
+       </option>`
+    ).join('');
+    dims.textContent = `${data.dims} dims`;
+  } catch(e) {
+    sel.innerHTML = '<option>Error loading</option>';
+  }
+
+  // Switch on change
+  sel.addEventListener('change', async () => {
+    const provider = sel.value;
+    status.textContent = 'Switching...';
+    status.style.color = 'var(--muted)';
+    try {
+      const r = await fetch(`/api/embed-provider/${provider}`, {method:'POST'});
+      const data = await r.json();
+      if (data.ok) {
+        dims.textContent = `${data.dims} dims`;
+        status.textContent = `✓ Switched to ${provider}`;
+        status.style.color = 'var(--accent)';
+      }
+    } catch(e) {
+      status.textContent = '✗ Failed';
+      status.style.color = '#f87171';
+    }
+    setTimeout(() => status.textContent = '', 3000);
+  });
+})();
+</script>
 
 </div>
 {% endblock %}

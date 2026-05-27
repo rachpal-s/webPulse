@@ -13,9 +13,9 @@ function sortArchive() {
   if (!tbody) return;
   const rows = Array.from(tbody.querySelectorAll('tr'));
   rows.sort((a, b) => {
-    const aT = a.querySelector('td:nth-child(5)')?.textContent.trim() || '';
-    const bT = b.querySelector('td:nth-child(5)')?.textContent.trim() || '';
-    return _sortAsc ? aT.localeCompare(bT) : bT.localeCompare(aT);
+    const aT = parseFloat(a.dataset.ts || 0);
+    const bT = parseFloat(b.dataset.ts || 0);
+    return _sortAsc ? aT - bT : bT - aT;
   });
   rows.forEach(r => tbody.appendChild(r));
   _sortAsc = !_sortAsc;
@@ -204,7 +204,7 @@ function sortArchive() {
       <tbody id="archiveTbody">
         {% for date_str, briefs in archive_by_date.items() %}
         {% for b in briefs %}
-        <tr>
+        <tr data-ts="{{ b.completed_at or 0 }}">
           <td>{{ b.brief_date }}</td>
           <td>{% for cat in categories %}{% if cat.id == b.category_id %}{{ cat.icon }} {% endif %}{% endfor %}{{ b.category_name }}</td>
           <td><span class="status-dot {{ b.status }}">{{ b.status }}</span></td>
@@ -298,7 +298,11 @@ function renderPanel(panel) {
     setTimeout(() => renderPanel(panel), 100);
     return;
   }
-  let html = renderContent(panel.dataset.content || '');
+  // Decode HTML entities from data attribute before rendering
+  // (Jinja | e filter escapes content for safe attribute embedding)
+  const _tmp = document.createElement('textarea');
+  _tmp.innerHTML = panel.dataset.content || '';
+  let html = renderContent(_tmp.value);
   try {
     const sm = JSON.parse(panel.dataset.sources || '{}');
     const tm = {};

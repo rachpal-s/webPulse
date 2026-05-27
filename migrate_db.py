@@ -197,5 +197,14 @@ conn.executescript("""
 conn.commit()
 print("  OK  chunk_embeddings created")
 
+# Add embed provider tracking to sessions
+try:
+    conn.execute("ALTER TABLE sessions ADD COLUMN embed_provider TEXT DEFAULT 'ollama'")
+    conn.execute("ALTER TABLE sessions ADD COLUMN embed_model TEXT DEFAULT ''")
+    conn.commit()
+    print("  OK  sessions.embed_provider + embed_model added")
+except Exception:
+    print("  OK  sessions.embed_provider already exists")
+
 print("\nDone. Restart the app.")
 conn.close()
