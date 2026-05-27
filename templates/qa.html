@@ -68,6 +68,12 @@
           <label class="setting-label">Stream response</label>
           <input type="checkbox" id="streamToggle" checked style="accent-color:var(--accent)">
         </div>
+        <div class="setting-row" style="margin-top:8px">
+          <label class="setting-label" title="Fix raw HTML links in responses">Smart links</label>
+          <input type="checkbox" id="smartLinksToggle" checked
+                 style="accent-color:var(--accent)"
+                 onchange="if(typeof SMART_LINK_RENDERING!=='undefined') SMART_LINK_RENDERING=this.checked">
+        </div>
       </div>
     </aside>
 

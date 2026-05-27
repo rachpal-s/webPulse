@@ -953,21 +953,45 @@ async def ingest_documents(
         )
         all_chunks.extend(doc_chunks)
 
-    # Generate embeddings in batches
-    BATCH_SIZE = 16
+    # Generate embeddings — small batches with per-batch retry
+    BATCH_SIZE = 8   # smaller = less Ollama memory pressure
+    MAX_RETRIES = 3
     texts = [c.content for c in all_chunks]
-    try:
-        all_embeddings: list[list[float]] = []
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i:i+BATCH_SIZE]
-            embs = await ollama.embed(batch)
-            all_embeddings.extend(embs)
+    import logging as _lg2
+    _rag_log = _lg2.getLogger("rag")
+    all_embeddings: list[list[float]] = []
+    embed_failed = False
 
-        for chunk, emb in zip(all_chunks, all_embeddings):
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i:i + BATCH_SIZE]
+        success = False
+        for attempt in range(MAX_RETRIES):
+            try:
+                embs = await ollama.embed(batch)
+                all_embeddings.extend(embs)
+                success = True
+                break
+            except Exception as _be:
+                _rag_log.warning("Embed batch %d attempt %d failed: %s",
+                                 i // BATCH_SIZE, attempt + 1, _be)
+                if attempt < MAX_RETRIES - 1:
+                    import asyncio as _aio2
+                    await _aio2.sleep(2)
+        if not success:
+            _rag_log.error("Embed batch %d failed after %d retries — skipping",
+                           i // BATCH_SIZE, MAX_RETRIES)
+            all_embeddings.extend([[] for _ in batch])
+            embed_failed = True
+
+    if embed_failed:
+        ctx.error = "Some embedding batches failed. Partial semantic search available."
+
+    for chunk, emb in zip(all_chunks, all_embeddings):
+        if emb:
             chunk.embedding = emb
-    except Exception as e:
-        # If embeddings fail, still save chunks for keyword fallback
-        ctx.error = f"Embeddings failed: {e}. Using keyword fallback."
+
+    _rag_log.info("Embeddings: %d/%d chunks embedded",
+                  sum(1 for c in all_chunks if c.embedding), len(all_chunks))
 
     store.save_chunks(session_id, all_chunks)
     ctx.chunk_count = len(all_chunks)

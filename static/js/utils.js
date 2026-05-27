@@ -1,6 +1,59 @@
 /* static/js/utils.js — shared utilities */
 
 // ── Markdown → HTML renderer ──────────────────────────────────────────────────
+// ── Smart Link Rendering (optional) ──────────────────────────────────────────
+// When enabled: regex cleans up raw <a> tags mixed with markdown bullets
+// so they render as proper clickable links.
+// Toggle in Q&A settings or change default here.
+let SMART_LINK_RENDERING = true;
+
+function applySmartLinks(text) {
+  if (!SMART_LINK_RENDERING) return text;
+
+  // 1. Unescape HTML-entity encoded anchors: &lt;a href="..."&gt;text&lt;/a&gt;
+  text = text.replace(/&lt;a\s+href="([^"]+)"[^&]*&gt;([^&]*)&lt;\/a&gt;/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer">$2</a>');
+
+  // 2. Raw <a href="..."> appearing as literal text (not parsed as HTML)
+  //    Match: <a href="URL" target="..." rel="...">TEXT</a>
+  //    These appear when LLM output is run through mdToHtml which escapes them
+  text = text.replace(
+    /&lt;a href="([^"]+)"[^>]*&gt;([^<]*)&lt;\/a&gt;/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer">$2</a>'
+  );
+
+  // 3. Remove markdown bullet (* or -) before a raw <a tag
+  text = text.replace(/^[\*\-]\s+(<a[\s>])/gm, '$1');
+
+  return text;
+}
+
+function fixRawAnchorsInHtml(html) {
+  // After full rendering, find any remaining raw <a href=...> text inside elements
+  // and convert them to real links using a DOM approach
+  if (!SMART_LINK_RENDERING) return html;
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  // Walk all text nodes and replace raw anchor patterns
+  const walker = document.createTreeWalker(div, NodeFilter.SHOW_TEXT);
+  const toReplace = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    if (/<a\s+href=/.test(node.textContent)) {
+      toReplace.push(node);
+    }
+  }
+  for (const n of toReplace) {
+    const span = document.createElement('span');
+    span.innerHTML = n.textContent.replace(
+      /<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g,
+      '<a href="$1" target="_blank" rel="noopener noreferrer">$2</a>'
+    );
+    n.parentNode.replaceChild(span, n);
+  }
+  return div.innerHTML;
+}
+
 function mdToHtml(text) {
   if (!text) return '<em style="color:var(--muted)">— No content extracted —</em>';
   const lines = text.split('\n');
@@ -268,6 +321,9 @@ function linkifySources(html, sourceMap) {
 function renderContent(text) {
   if (!text) return '<em style="color:var(--muted)">— No content —</em>';
 
+  // Apply smart link cleanup before any processing
+  text = applySmartLinks(text);
+
   // Strip code fences the LLM sometimes wraps around HTML
   const stripped = text.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/, '').trim();
 
@@ -296,13 +352,13 @@ function renderContent(text) {
   // Check if content also has Markdown (bold/italic/bullets)
   const hasMd = /\*\*|\n\s*[\*\-] /.test(linkified);
 
+  let result;
   if (hasHtmlTags && hasMd) {
-    // Mixed: convert MD first then sanitize HTML
-    const converted = mdToHtml(linkified);
-    return sanitizeHtml(converted);
+    result = sanitizeHtml(mdToHtml(linkified));
+  } else if (hasHtmlTags) {
+    result = sanitizeHtml(linkified);
+  } else {
+    result = mdToHtml(linkified);
   }
-  if (hasHtmlTags) {
-    return sanitizeHtml(linkified);
-  }
-  return mdToHtml(linkified);
+  return fixRawAnchorsInHtml(result);
 }

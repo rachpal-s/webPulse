@@ -24,6 +24,35 @@ def get_ip():
     
     return local_ip
 
+async def _check_ollama():
+    import httpx
+    cfg_inner = get_settings()
+    checks = [
+        ("Embed   ", cfg_inner.ollama_embed_url),
+        ("Inference", cfg_inner.ollama_inference_url),
+    ]
+    all_ok = True
+    print("  Checking Ollama endpoints...")
+    for label, base_url in checks:
+        url = base_url.rstrip("/") + "/api/tags"
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(url)
+            if r.status_code == 200:
+                models = [m["name"] for m in r.json().get("models", [])]
+                print(f"  OK  {label}: {base_url} ({len(models)} models: {', '.join(models[:3])})")
+            else:
+                print(f"  ERR {label}: {base_url} HTTP {r.status_code}")
+                all_ok = False
+        except Exception as e:
+            print(f"  ERR {label}: {base_url} UNREACHABLE — {e.__class__.__name__}")
+            all_ok = False
+    if not all_ok:
+        print("  WARNING: Ollama endpoint(s) down — no semantic search, keyword fallback only")
+    else:
+        print("  All Ollama endpoints reachable — semantic search enabled")
+    print()
+
 if __name__ == "__main__":
     PORT = cfg.app_port
     HOST = cfg.app_host
@@ -39,6 +68,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     PORT = args.port
+
+    import asyncio as _aio
+    _aio.run(_check_ollama())
 
     print(f"""
   ██╗    ██╗███████╗██████╗ ██████╗ ██╗   ██╗██╗      ███████╗███████╗

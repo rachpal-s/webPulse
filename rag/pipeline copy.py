@@ -71,13 +71,8 @@ class VectorStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        import sqlite_vec
         conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
         conn.row_factory = sqlite3.Row
-        # WAL mode ensures vec0 virtual table data persists across connections
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
@@ -116,6 +111,18 @@ class VectorStore:
             "ALTER TABLE morning_briefs ADD COLUMN category_name TEXT DEFAULT 'General'",
             "ALTER TABLE brief_insights ADD COLUMN brief_id INTEGER DEFAULT NULL",
             "ALTER TABLE brief_categories ADD COLUMN description TEXT DEFAULT ''",
+            """CREATE TABLE IF NOT EXISTS url_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL, category_id INTEGER NOT NULL,
+                source_url TEXT DEFAULT '', title TEXT DEFAULT '',
+                summary TEXT DEFAULT '', relevance_score REAL DEFAULT 0,
+                discovered_at REAL NOT NULL, status TEXT DEFAULT 'pending',
+                UNIQUE(url, category_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                chunk_id TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL
+            )""",
             "ALTER TABLE brief_insights ADD COLUMN sources_json TEXT DEFAULT '{}'",
             "ALTER TABLE brief_insights ADD COLUMN sources_json TEXT DEFAULT '{}'",
         ]
@@ -151,9 +158,9 @@ class VectorStore:
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
 
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
+            CREATE TABLE IF NOT EXISTS chunk_embeddings (
                 chunk_id TEXT PRIMARY KEY,
-                embedding float[{cfg.embed_dimensions}]
+                embedding BLOB NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_chunks_session
@@ -201,6 +208,17 @@ class VectorStore:
 
             CREATE INDEX IF NOT EXISTS idx_briefs_date
                 ON morning_briefs(brief_date);
+
+            CREATE TABLE IF NOT EXISTS url_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL, category_id INTEGER NOT NULL,
+                source_url TEXT DEFAULT '', title TEXT DEFAULT '',
+                summary TEXT DEFAULT '', relevance_score REAL DEFAULT 0,
+                discovered_at REAL NOT NULL, status TEXT DEFAULT 'pending',
+                UNIQUE(url, category_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_queue_cat
+                ON url_queue(category_id, status, discovered_at);
 
             CREATE TABLE IF NOT EXISTS brief_insights (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -261,7 +279,7 @@ class VectorStore:
                     f"{len(chunk.embedding)}f", *chunk.embedding
                 )
                 conn.execute("""
-                    INSERT OR REPLACE INTO chunk_vectors (chunk_id, embedding)
+                    INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding)
                     VALUES (?, ?)
                 """, (chunk.chunk_id, serialized))
 
@@ -274,20 +292,39 @@ class VectorStore:
         query_embedding: list[float],
         top_k: int = 5,
     ) -> list[dict]:
+        """Cosine similarity over persistent BLOB embeddings — no vec0 needed."""
         conn = self._connect()
-        serialized = struct.pack(f"{len(query_embedding)}f", *query_embedding)
-        rows = conn.execute(f"""
+        rows = conn.execute("""
             SELECT c.chunk_id, c.content, c.source_url, c.source_title,
-                   c.section, c.chunk_index, c.word_count,
-                   vec_distance_cosine(cv.embedding, ?) AS distance
-            FROM chunk_vectors cv
-            JOIN chunks c ON cv.chunk_id = c.chunk_id
+                   c.section, c.chunk_index, c.word_count, ce.embedding
+            FROM chunks c
+            JOIN chunk_embeddings ce ON c.chunk_id = ce.chunk_id
             WHERE c.session_id = ?
-            ORDER BY distance ASC
-            LIMIT ?
-        """, (serialized, session_id, top_k)).fetchall()
+        """, (session_id,)).fetchall()
         conn.close()
-        return [dict(r) for r in rows]
+
+        if not rows:
+            return []
+
+        q = query_embedding
+        q_mag = sum(x * x for x in q) ** 0.5
+        if q_mag == 0:
+            return []
+
+        dims = len(q)
+        scored = []
+        for row in rows:
+            emb = struct.unpack(f"{dims}f", bytes(row["embedding"]))
+            dot = sum(a * b for a, b in zip(q, emb))
+            e_mag = sum(x * x for x in emb) ** 0.5
+            sim = dot / (q_mag * e_mag) if e_mag > 0 else 0.0
+            d = dict(row)
+            d.pop("embedding", None)
+            d["similarity"] = round(sim, 4)
+            scored.append((sim, d))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [d for _, d in scored[:top_k]]
 
     def get_all_chunks(self, session_id: str) -> list[dict]:
         conn = self._connect()
@@ -312,7 +349,7 @@ class VectorStore:
 
     def delete_session(self, session_id: str):
         conn = self._connect()
-        conn.execute("DELETE FROM chunk_vectors WHERE chunk_id IN "
+        conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id IN "
                      "(SELECT chunk_id FROM chunks WHERE session_id = ?)", (session_id,))
         conn.execute("DELETE FROM chunks WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
@@ -972,13 +1009,12 @@ async def query(
 
     else:
         # Vector search
-        # Load chunks upfront from regular SQLite (persists across restarts)
+        # Load chunks upfront from persistent SQLite
         chunks = store.get_all_chunks(session_id)
         import logging as _log
         _log.getLogger("rag").info("Session %s: %d chunks in DB", session_id, len(chunks))
 
         try:
-            # Try vector search first for relevance
             for _attempt in range(2):
                 try:
                     q_emb = await ollama.embed([question])
@@ -986,7 +1022,7 @@ async def query(
                 except Exception as _e:
                     if _attempt == 0:
                         import asyncio as _aio
-                        await _aio.sleep(3)
+                        await _aio.sleep(3)   # give Ollama time to reload
                     else:
                         raise
             relevant = store.similarity_search(session_id, q_emb[0], top_k=top_k)
@@ -1019,9 +1055,8 @@ async def query(
                 text_lower = c["content"].lower()
                 score = sum(1 for kw in keywords if kw in text_lower)
                 if score > 0:
-                    scored.append((score, idx, c))
+                    scored.append((score, idx, c))  # idx breaks ties
             scored.sort(key=lambda x: x[0], reverse=True)
-            # Supplement with unscored chunks so named entities aren't missed
             if len(scored) < top_k:
                 scored_urls = {c["source_url"] for _, _, c in scored}
                 extra = [c for c in chunks if c["source_url"] not in scored_urls]
@@ -1062,8 +1097,6 @@ async def query(
         "- Use the URL from [CITE AS: title](url) markers in the context.\n"
         "- Write citations as: [Short Title](URL) — keep link text brief, max 6 words.\n"
         "- Do NOT include 'CITE AS:' in your output — just write the Markdown link.\n"
-        "- Do NOT write '— Markdown link' or any meta-commentary about link format.\n"
-        "- Embed links naturally in sentences, do not append them separately.\n"
         "- Do NOT write '— Markdown link' or any meta-commentary about link format.\n"
         "- Embed links naturally in sentences, do not append them separately.\n"
         "- DO NOT refuse to answer just because you cannot cite every claim.\n\n"
