@@ -48,6 +48,8 @@ class RAGContext:
     sources: list[dict]                 # [{url, title}]
     ready: bool = False
     error: Optional[str] = None
+    embed_provider: str = "ollama"      # provider used to embed this session
+    embed_model: str = ""               # exact model used
 
 
 @dataclass
@@ -73,6 +75,7 @@ class VectorStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        # WAL mode ensures vec0 virtual table data persists across connections
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
@@ -111,18 +114,8 @@ class VectorStore:
             "ALTER TABLE morning_briefs ADD COLUMN category_name TEXT DEFAULT 'General'",
             "ALTER TABLE brief_insights ADD COLUMN brief_id INTEGER DEFAULT NULL",
             "ALTER TABLE brief_categories ADD COLUMN description TEXT DEFAULT ''",
-            """CREATE TABLE IF NOT EXISTS url_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT NOT NULL, category_id INTEGER NOT NULL,
-                source_url TEXT DEFAULT '', title TEXT DEFAULT '',
-                summary TEXT DEFAULT '', relevance_score REAL DEFAULT 0,
-                discovered_at REAL NOT NULL, status TEXT DEFAULT 'pending',
-                UNIQUE(url, category_id)
-            )""",
-            """CREATE TABLE IF NOT EXISTS chunk_embeddings (
-                chunk_id TEXT PRIMARY KEY,
-                embedding BLOB NOT NULL
-            )""",
+            "ALTER TABLE sessions ADD COLUMN embed_provider TEXT DEFAULT 'ollama'",
+            "ALTER TABLE sessions ADD COLUMN embed_model TEXT DEFAULT ''",
             "ALTER TABLE brief_insights ADD COLUMN sources_json TEXT DEFAULT '{}'",
             "ALTER TABLE brief_insights ADD COLUMN sources_json TEXT DEFAULT '{}'",
         ]
@@ -141,7 +134,9 @@ class VectorStore:
                 created_at REAL,
                 mode TEXT,
                 total_words INTEGER,
-                sources TEXT
+                sources TEXT,
+                embed_provider TEXT DEFAULT 'ollama',
+                embed_model TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS chunks (
@@ -209,17 +204,6 @@ class VectorStore:
             CREATE INDEX IF NOT EXISTS idx_briefs_date
                 ON morning_briefs(brief_date);
 
-            CREATE TABLE IF NOT EXISTS url_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT NOT NULL, category_id INTEGER NOT NULL,
-                source_url TEXT DEFAULT '', title TEXT DEFAULT '',
-                summary TEXT DEFAULT '', relevance_score REAL DEFAULT 0,
-                discovered_at REAL NOT NULL, status TEXT DEFAULT 'pending',
-                UNIQUE(url, category_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_queue_cat
-                ON url_queue(category_id, status, discovered_at);
-
             CREATE TABLE IF NOT EXISTS brief_insights (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 brief_date TEXT NOT NULL,
@@ -245,10 +229,12 @@ class VectorStore:
         conn = self._connect()
         conn.execute("""
             INSERT OR REPLACE INTO sessions
-            (session_id, created_at, mode, total_words, sources)
-            VALUES (?, ?, ?, ?, ?)
+            (session_id, created_at, mode, total_words, sources,
+             embed_provider, embed_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (ctx.session_id, time.time(), ctx.mode,
-              ctx.total_words, json.dumps(ctx.sources)))
+              ctx.total_words, json.dumps(ctx.sources),
+              ctx.embed_provider, ctx.embed_model))
         conn.commit()
         conn.close()
 
@@ -260,6 +246,11 @@ class VectorStore:
             "SELECT chunk_id FROM chunks WHERE session_id=?", (session_id,)
         ).fetchall()]
         if old_ids:
+            placeholders = ",".join("?" * len(old_ids))
+            try:
+                conn.execute(f"DELETE FROM chunk_embeddings WHERE chunk_id IN ({placeholders})", old_ids)
+            except Exception:
+                pass  # vec0 may not support DELETE — ignore
             conn.execute("DELETE FROM chunks WHERE session_id=?", (session_id,))
             conn.commit()
 
@@ -292,7 +283,7 @@ class VectorStore:
         query_embedding: list[float],
         top_k: int = 5,
     ) -> list[dict]:
-        """Cosine similarity over persistent BLOB embeddings — no vec0 needed."""
+        """Cosine similarity over persistent BLOB embeddings."""
         conn = self._connect()
         rows = conn.execute("""
             SELECT c.chunk_id, c.content, c.source_url, c.source_title,
@@ -302,15 +293,12 @@ class VectorStore:
             WHERE c.session_id = ?
         """, (session_id,)).fetchall()
         conn.close()
-
         if not rows:
             return []
-
         q = query_embedding
         q_mag = sum(x * x for x in q) ** 0.5
         if q_mag == 0:
             return []
-
         dims = len(q)
         scored = []
         for row in rows:
@@ -322,7 +310,6 @@ class VectorStore:
             d.pop("embedding", None)
             d["similarity"] = round(sim, 4)
             scored.append((sim, d))
-
         scored.sort(key=lambda x: x[0], reverse=True)
         return [d for _, d in scored[:top_k]]
 
@@ -586,16 +573,11 @@ class VectorStore:
             """, (status, _time.time(), session_id, articles, html, error,
                   date_str, category_id))
         else:
-            row = conn.execute(
-                "SELECT id FROM morning_briefs WHERE brief_date=? ORDER BY started_at DESC LIMIT 1",
-                (date_str,)
-            ).fetchone()
-            if row:
-                conn.execute("""
-                    UPDATE morning_briefs SET status=?,completed_at=?,
-                    rag_session_id=?,articles_scraped=?,html_content=?,error_msg=?
-                    WHERE id=?
-                """, (status, _time.time(), session_id, articles, html, error, row[0]))
+            conn.execute("""
+                UPDATE morning_briefs SET status=?,completed_at=?,
+                rag_session_id=?,articles_scraped=?,html_content=?,error_msg=?
+                WHERE brief_date=? ORDER BY started_at DESC LIMIT 1
+            """, (status, _time.time(), session_id, articles, html, error, date_str))
         conn.commit()
         conn.close()
 
@@ -771,6 +753,34 @@ class VectorStore:
         return n
 
 
+class _ProviderAwareLCEmbeddings:
+    """LangChain Embeddings interface that routes through OllamaClient.embed().
+    This ensures SemanticChunker uses the configured EMBED_PROVIDER
+    (ollama/google/openai/cohere) instead of hardcoding localhost.
+    """
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Sync embed for LangChain compatibility."""
+        import asyncio as _aio
+        client = get_ollama_client()
+        try:
+            loop = _aio.get_event_loop()
+            if loop.is_running():
+                # Running inside async context — use run_in_executor
+                import concurrent.futures as _cf
+                with _cf.ThreadPoolExecutor() as pool:
+                    future = pool.submit(_aio.run, client.embed(texts))
+                    return future.result(timeout=120)
+            else:
+                return loop.run_until_complete(client.embed(texts))
+        except Exception:
+            return _aio.run(client.embed(texts))
+
+    def embed_query(self, text: str) -> list[float]:
+        """Sync embed single text for LangChain compatibility."""
+        return self.embed_documents([text])[0]
+
+
 class AdaptiveChunker:
     """
     Two-phase chunking:
@@ -783,10 +793,10 @@ class AdaptiveChunker:
         self._lc_embeddings = None
 
     def _get_lc_embeddings(self):
-        if self._lc_embeddings is None:
-            client = get_ollama_client()
-            self._lc_embeddings = client.as_langchain_embeddings()
-        return self._lc_embeddings
+        """Return a LangChain-compatible embeddings object that routes
+        through our OllamaClient.embed() — respects EMBED_PROVIDER setting."""
+        # Always create fresh so provider changes take effect immediately
+        return _ProviderAwareLCEmbeddings()
 
     def chunk_document(
         self,
@@ -798,10 +808,10 @@ class AdaptiveChunker:
     ) -> list[Chunk]:
         """Split a document into semantically coherent chunks with metadata."""
 
-        # ── Try semantic chunking ─────────────────────────────────────────────
+        # ── Try semantic chunking (uses configured EMBED_PROVIDER) ─────────
         try:
             from langchain_experimental.text_splitter import SemanticChunker
-            embeddings = self._get_lc_embeddings()
+            embeddings = self._get_lc_embeddings()  # provider-aware wrapper
             splitter = SemanticChunker(
                 embeddings,
                 breakpoint_threshold_type=cfg.chunk_breakpoint_type,
@@ -813,7 +823,7 @@ class AdaptiveChunker:
             # Fallback: recursive character splitter
             from langchain_text_splitters import RecursiveCharacterTextSplitter
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=cfg.chunk_max_size * 5,  # chars
+                chunk_size=cfg.chunk_max_size * 5,
                 chunk_overlap=200,
                 separators=["\n\n", "\n", ". ", " "],
             )
@@ -857,15 +867,17 @@ def _infer_section(text: str) -> str:
 
 
 def _make_chunk_id(url: str, idx: int) -> str:
-    import time as _time
-    h = hashlib.md5(f"{url}::{idx}::{_time.time()}".encode()).hexdigest()[:12]
+    h = hashlib.md5(f"{url}::{idx}".encode()).hexdigest()[:12]
     return f"chunk_{h}_{idx}"
 
 
 def _make_session_id(urls: list[str]) -> str:
     import time as _time
+    # Include timestamp so each ingest run gets a unique session
+    # (prevents UNIQUE constraint failures on vec0 virtual table)
     combined = "|".join(sorted(urls)) + f"|{_time.time()}"
     return hashlib.md5(combined.encode()).hexdigest()[:16]
+
 
 # ── Main RAG pipeline ─────────────────────────────────────────────────────────
 
@@ -912,6 +924,12 @@ async def ingest_documents(
         total_words=total_words,
         chunk_count=0,
         sources=sources,
+        embed_provider=cfg.embed_provider,
+        embed_model=(cfg.google_embed_model if cfg.embed_provider == "google"
+                     else cfg.openai_embed_model if cfg.embed_provider == "openai"
+                     else cfg.cohere_embed_model if cfg.embed_provider == "cohere"
+                     else cfg.jina_embed_model if cfg.embed_provider == "jina"
+                     else cfg.ollama_embed_model),
     )
 
     store = get_store()
@@ -940,6 +958,9 @@ async def ingest_documents(
     chunker = get_chunker()
     ollama = get_ollama_client()
 
+    import time as _ingest_time
+    _t_start = _ingest_time.time()
+    _timings: dict[str, float] = {}
     all_chunks: list[Chunk] = []
     for doc in documents:
         content = doc.get("content","")
@@ -953,23 +974,89 @@ async def ingest_documents(
         )
         all_chunks.extend(doc_chunks)
 
-    # Generate embeddings in batches
-    BATCH_SIZE = 16
-    texts = [c.content for c in all_chunks]
-    try:
-        all_embeddings: list[list[float]] = []
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i:i+BATCH_SIZE]
-            embs = await ollama.embed(batch)
-            all_embeddings.extend(embs)
+    _timings["chunking"] = round(_ingest_time.time() - _t_start, 2)
 
-        for chunk, emb in zip(all_chunks, all_embeddings):
+    # Generate embeddings — provider-aware batch size + per-batch retry
+    import os as _os_emb, logging as _lg2
+    _rag_log = _lg2.getLogger("rag")
+    _cur_provider = _os_emb.environ.get("EMBED_PROVIDER", cfg.embed_provider).lower()
+    try:
+        from rag.ollama import OllamaClient as _OC
+        _pcfg = _OC._PROVIDER_CONFIG.get(_cur_provider, _OC._PROVIDER_CONFIG["ollama"])
+        BATCH_SIZE = _pcfg["batch_size"]
+        INTER_BATCH_SLEEP = _pcfg["inter_batch_sleep"]
+    except Exception:
+        BATCH_SIZE = 4
+        INTER_BATCH_SLEEP = 0.5
+    MAX_RETRIES = 3
+    texts = [c.content for c in all_chunks]
+    all_embeddings: list[list[float]] = []
+    embed_failed = False
+    _rag_log.info("Embedding %d chunks via %s (batch=%d)", len(texts), _cur_provider, BATCH_SIZE)
+
+    # Warmup — ensure model loaded before batch processing
+    try:
+        await ollama.embed(["warmup"])
+        _rag_log.info("Embed model warmed up")
+    except Exception:
+        import asyncio as _aio_w
+        await _aio_w.sleep(3)
+
+    total_batches = (len(texts) + BATCH_SIZE - 1) // BATCH_SIZE
+    LOG_EVERY = max(1, total_batches // 5)
+
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i:i+BATCH_SIZE]
+        batch_num = i // BATCH_SIZE
+        if batch_num % LOG_EVERY == 0 or batch_num == total_batches - 1:
+            done = len(all_embeddings)
+            _rag_log.info("Embedding progress: %d/%d chunks, %d remaining",
+                          done, len(texts), len(texts) - done)
+        success = False
+        for attempt in range(MAX_RETRIES):
+            try:
+                embs = await ollama.embed(batch)
+                all_embeddings.extend(embs)
+                success = True
+                break
+            except Exception as _be:
+                _rag_log.warning("Embed batch %d attempt %d failed: %s",
+                                 i // BATCH_SIZE, attempt + 1, _be)
+                if attempt < MAX_RETRIES - 1:
+                    import asyncio as _aio2
+                    await _aio2.sleep(5)  # longer wait on throttled CPU
+        if not success:
+            _rag_log.error("Embed batch %d failed after %d retries — skipping",
+                           i // BATCH_SIZE, MAX_RETRIES)
+            # Fill with empty embeddings for this batch so indices stay aligned
+            all_embeddings.extend([[] for _ in batch])
+            embed_failed = True
+
+        # Brief pause between batches — lets CPU cool on throttled hardware
+        if i + BATCH_SIZE < len(texts):
+            import asyncio as _aio3
+            await _aio3.sleep(0.5)
+
+    if embed_failed:
+        ctx.error = "Some embedding batches failed. Partial semantic search available."
+
+    for chunk, emb in zip(all_chunks, all_embeddings):
+        if emb:  # only assign non-empty embeddings
             chunk.embedding = emb
-    except Exception as e:
-        # If embeddings fail, still save chunks for keyword fallback
-        ctx.error = f"Embeddings failed: {e}. Using keyword fallback."
+
+    _embed_count = sum(1 for c in all_chunks if c.embedding)
+    _timings["embedding"] = round(_ingest_time.time() - _t_start - _timings["chunking"], 2)
+    _rag_log.info("Embeddings: %d/%d chunks embedded", _embed_count, len(all_chunks))
 
     store.save_chunks(session_id, all_chunks)
+    _timings["db_save"] = round(_ingest_time.time() - _t_start
+                                - _timings["chunking"] - _timings["embedding"], 2)
+    _timings["total"] = round(_ingest_time.time() - _t_start, 2)
+    _rag_log.info(
+        "Ingest complete — chunks=%d | chunking=%.1fs | embedding=%.1fs | save=%.1fs | total=%.1fs",
+        len(all_chunks), _timings["chunking"], _timings["embedding"],
+        _timings["db_save"], _timings["total"]
+    )
     ctx.chunk_count = len(all_chunks)
     ctx.ready = True
     return ctx
@@ -1009,29 +1096,52 @@ async def query(
 
     else:
         # Vector search
-        # Load chunks upfront from persistent SQLite
+        # Always load all chunks first — they persist in regular SQLite
         chunks = store.get_all_chunks(session_id)
         import logging as _log
         _log.getLogger("rag").info("Session %s: %d chunks in DB", session_id, len(chunks))
 
+        # Use the provider that originally embedded this session
+        session_provider = (session.get("embed_provider") or "ollama").lower()
+        # Read live from env — cfg may be stale lru_cache
+        import os as _os2
+        current_provider = _os2.environ.get("EMBED_PROVIDER", cfg.embed_provider).lower()
+        if session_provider != current_provider:
+            _log.getLogger("rag").info(
+                "Provider mismatch: session='%s' current='%s' — using session provider",
+                session_provider, current_provider)
+            # Temporarily switch provider for query embedding
+            _orig = cfg.embed_provider
+            object.__setattr__(cfg, "embed_provider", session_provider)
+            from rag.ollama import OllamaClient as _OC
+            query_client = _OC()
+            object.__setattr__(cfg, "embed_provider", _orig)
+        else:
+            query_client = ollama
+
         try:
+            # Try vector search first for better relevance
             for _attempt in range(2):
                 try:
-                    q_emb = await ollama.embed([question])
+                    q_emb = await query_client.embed([question])
                     break
                 except Exception as _e:
                     if _attempt == 0:
                         import asyncio as _aio
-                        await _aio.sleep(3)   # give Ollama time to reload
+                        _log.getLogger("rag").warning(
+                            "Query embed failed (%s): %s — retrying", session_provider, _e)
+                        await _aio.sleep(3)
                     else:
-                        raise
+                        # Final fallback: try current provider
+                        _log.getLogger("rag").warning(
+                            "Falling back to current provider '%s' for query", current_provider)
+                        q_emb = await ollama.embed([question])
+                        break
             relevant = store.similarity_search(session_id, q_emb[0], top_k=top_k)
-            import logging as _log
             _log.getLogger("rag").info("similarity_search returned %d chunks for session %s",
                                         len(relevant), session_id)
-            # If vector search returns nothing, fall back immediately to full context
             if not relevant:
-                raise Exception("similarity_search returned 0 results — using keyword fallback")
+                raise Exception("similarity_search returned 0 — using keyword fallback")
             context_parts = []
             seen: dict = {}   # url -> title
             for row in relevant:
@@ -1048,7 +1158,7 @@ async def query(
             sources_used = [{"url": u, "title": t} for u, t in seen.items()]
             chunks_used = len(relevant)
         except Exception:
-            # Keyword fallback using pre-loaded chunks
+            # Keyword fallback using chunks already loaded above
             keywords = set(question.lower().split())
             scored = []
             for idx, c in enumerate(chunks):
@@ -1057,7 +1167,10 @@ async def query(
                 if score > 0:
                     scored.append((score, idx, c))  # idx breaks ties
             scored.sort(key=lambda x: x[0], reverse=True)
+            # Always use ALL chunks when scored results are few — named entities
+            # like stock names may not appear in top_k keyword results
             if len(scored) < top_k:
+                # Supplement with unscored chunks
                 scored_urls = {c["source_url"] for _, _, c in scored}
                 extra = [c for c in chunks if c["source_url"] not in scored_urls]
                 top = [c for _, _, c in scored] + extra[:top_k - len(scored)]

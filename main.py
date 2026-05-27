@@ -30,7 +30,7 @@ from scraper.engine import (
     _trafilatura, _newspaper3k, _readability, _goose3, _beautifulsoup, _playwright,
     _pick_best, clean_text, IS_BLOCKED,
 )
-
+import re as _re
 cfg = get_settings()
 
 from contextlib import asynccontextmanager
@@ -900,8 +900,19 @@ async def set_embed_provider(provider: str):
         from fastapi import HTTPException
         raise HTTPException(400, f"Invalid provider. Choose from: {valid}")
     _os.environ["EMBED_PROVIDER"] = provider
+    try:
+        env_txt = open(".env").read()
+        new_line = "EMBED_PROVIDER=" + provider
+        if "EMBED_PROVIDER=" in env_txt:
+            env_txt = _re.sub(r"^EMBED_PROVIDER=.*$", new_line, env_txt, flags=_re.MULTILINE)
+        else:
+            env_txt = env_txt.rstrip() + "\n" + new_line + "\n"
+        open(".env", "w").write(env_txt)
+    except Exception as e:
+        import logging
+        logging.getLogger("main").warning("Could not persist EMBED_PROVIDER: %s", e)
     dims = OllamaClient.dims_for_provider(provider)
-    return {"ok": True, "provider": provider, "dims": dims}
+    return {"ok": True, "provider": provider, "dims": dims, "persisted": True}
 
 # ── API: Ollama health ────────────────────────────────────────────────────────
 

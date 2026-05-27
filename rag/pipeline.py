@@ -809,16 +809,22 @@ class AdaptiveChunker:
         """Split a document into semantically coherent chunks with metadata."""
 
         # ── Try semantic chunking (uses configured EMBED_PROVIDER) ─────────
+        word_count = len(content.split())
+        SEMANTIC_WORD_LIMIT = 1500  # tune as needed
+
         try:
-            from langchain_experimental.text_splitter import SemanticChunker
-            embeddings = self._get_lc_embeddings()  # provider-aware wrapper
-            splitter = SemanticChunker(
-                embeddings,
-                breakpoint_threshold_type=cfg.chunk_breakpoint_type,
-                breakpoint_threshold_amount=cfg.chunk_breakpoint_threshold,
-            )
-            docs = splitter.create_documents([content])
-            raw_chunks = [d.page_content for d in docs]
+            if word_count <= SEMANTIC_WORD_LIMIT:
+                from langchain_experimental.text_splitter import SemanticChunker
+                embeddings = self._get_lc_embeddings()
+                splitter = SemanticChunker(
+                    embeddings,
+                    breakpoint_threshold_type=cfg.chunk_breakpoint_type,
+                    breakpoint_threshold_amount=cfg.chunk_breakpoint_threshold,
+                )
+                docs = splitter.create_documents([content])
+                raw_chunks = [d.page_content for d in docs]
+            else:
+                raise ValueError("doc too large for semantic chunking — using fast chunker")
         except Exception:
             # Fallback: recursive character splitter
             from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -958,6 +964,9 @@ async def ingest_documents(
     chunker = get_chunker()
     ollama = get_ollama_client()
 
+    import time as _ingest_time
+    _t_start = _ingest_time.time()
+    _timings: dict[str, float] = {}
     all_chunks: list[Chunk] = []
     for doc in documents:
         content = doc.get("content","")
@@ -971,25 +980,47 @@ async def ingest_documents(
         )
         all_chunks.extend(doc_chunks)
 
-    # Generate embeddings in batches with per-batch retry
-    BATCH_SIZE = 4   # small batches — helps on thermally throttled CPUs
+    _timings["chunking"] = round(_ingest_time.time() - _t_start, 2)
+
+    # Generate embeddings — provider-aware batch size + per-batch retry
+    import os as _os_emb, logging as _lg2
+    _rag_log = _lg2.getLogger("rag")
+    _cur_provider = _os_emb.environ.get("EMBED_PROVIDER", cfg.embed_provider).lower()
+    try:
+        from rag.ollama import OllamaClient as _OC
+        _pcfg = _OC._PROVIDER_CONFIG.get(_cur_provider, _OC._PROVIDER_CONFIG["ollama"])
+        BATCH_SIZE = _pcfg["batch_size"]
+        INTER_BATCH_SLEEP = _pcfg["inter_batch_sleep"]
+    except Exception:
+        BATCH_SIZE = 4
+        INTER_BATCH_SLEEP = 0.5
     MAX_RETRIES = 3
     texts = [c.content for c in all_chunks]
-    import logging as _lg2
-    _rag_log = _lg2.getLogger("rag")
     all_embeddings: list[list[float]] = []
     embed_failed = False
+    _rag_log.info("Embedding %d chunks via %s (batch=%d)", len(texts), _cur_provider, BATCH_SIZE)
 
-    # Warmup — ensure model loaded before batch processing
+    # Warmup — load model into memory before batch processing
+    # Send a realistic-size text to trigger full model load
     try:
-        await ollama.embed(["warmup"])
-        _rag_log.info("Embed model warmed up")
-    except Exception:
+        _warmup_text = "Stock market news today Nifty Sensex analysis " * 10
+        await ollama.embed([_warmup_text])
+        _rag_log.info("Embed model warmed up (provider=%s)", _cur_provider)
+    except Exception as _we:
+        _rag_log.warning("Warmup failed (%s) — continuing anyway", _we)
         import asyncio as _aio_w
-        await _aio_w.sleep(3)
+        await _aio_w.sleep(2)
+
+    total_batches = (len(texts) + BATCH_SIZE - 1) // BATCH_SIZE
+    LOG_EVERY = max(1, total_batches // 5)
 
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i:i+BATCH_SIZE]
+        batch_num = i // BATCH_SIZE
+        if batch_num % LOG_EVERY == 0 or batch_num == total_batches - 1:
+            done = len(all_embeddings)
+            _rag_log.info("Embedding progress: %d/%d chunks, %d remaining",
+                          done, len(texts), len(texts) - done)
         success = False
         for attempt in range(MAX_RETRIES):
             try:
@@ -1022,10 +1053,19 @@ async def ingest_documents(
         if emb:  # only assign non-empty embeddings
             chunk.embedding = emb
 
-    _rag_log.info("Embeddings: %d/%d chunks embedded",
-                  sum(1 for c in all_chunks if c.embedding), len(all_chunks))
+    _embed_count = sum(1 for c in all_chunks if c.embedding)
+    _timings["embedding"] = round(_ingest_time.time() - _t_start - _timings["chunking"], 2)
+    _rag_log.info("Embeddings: %d/%d chunks embedded", _embed_count, len(all_chunks))
 
     store.save_chunks(session_id, all_chunks)
+    _timings["db_save"] = round(_ingest_time.time() - _t_start
+                                - _timings["chunking"] - _timings["embedding"], 2)
+    _timings["total"] = round(_ingest_time.time() - _t_start, 2)
+    _rag_log.info(
+        "Ingest complete — chunks=%d | chunking=%.1fs | embedding=%.1fs | save=%.1fs | total=%.1fs",
+        len(all_chunks), _timings["chunking"], _timings["embedding"],
+        _timings["db_save"], _timings["total"]
+    )
     ctx.chunk_count = len(all_chunks)
     ctx.ready = True
     return ctx

@@ -114,11 +114,10 @@ class OllamaClient:
             "retry_sleep_base": 10,
         },
         "ollama": {
-            # Local — larger batch since /api/embed supports multi-input
-            # inter_batch_sleep=0 — adaptive sleep based on actual call duration
-            "batch_size": 16,
-            "inter_batch_sleep": 0.0,  # adaptive — see _embed_ollama
-            "retry_sleep_base": 3,
+            # Local — CPU/thermal throttle protection
+            "batch_size": 4,
+            "inter_batch_sleep": 0.5,
+            "retry_sleep_base": 5,
         },
         "jina": {
             # jina-embeddings-v3: 100 RPM, no daily limit, 10M free tokens
@@ -164,22 +163,16 @@ class OllamaClient:
         return _c
 
     async def _embed_ollama(self, texts: list[str]) -> list[list[float]]:
-        """Ollama embedding — concurrent batches with adaptive sleep."""
+        """Ollama embedding — batch first, legacy fallback. Respects thermal throttle config."""
         import asyncio as _aio
-        import time as _t
-        import logging as _lg
         cfg_p = self._PROVIDER_CONFIG["ollama"]
         BATCH = cfg_p["batch_size"]
-        CONCURRENCY = 2  # send 2 batches in parallel — safe for local Ollama
+        SLEEP = cfg_p["inter_batch_sleep"]
 
-        # Split all texts into batches
-        batches = [texts[i:i + BATCH] for i in range(0, len(texts), BATCH)]
-        all_embeddings = [None] * len(texts)  # pre-allocate to preserve order
-
-        async def embed_batch(batch_idx: int, batch: list[str]) -> None:
-            start = batch_idx * BATCH
-            async with httpx.AsyncClient(timeout=90) as c:
-                t0 = _t.monotonic()
+        all_embeddings = []
+        async with httpx.AsyncClient(timeout=60) as c:
+            for i in range(0, len(texts), BATCH):
+                batch = texts[i:i + BATCH]
                 try:
                     r = await c.post(
                         f"{self.embed_url}/api/embed",
@@ -187,39 +180,24 @@ class OllamaClient:
                         headers=self._emb_headers,
                     )
                     if r.status_code == 200:
-                        embs = r.json().get("embeddings", [])
-                        for j, emb in enumerate(embs):
-                            all_embeddings[start + j] = emb
-                        elapsed = _t.monotonic() - t0
-                        # Adaptive sleep: if call was fast (<0.5s), rest briefly
-                        if elapsed < 0.5:
-                            await _aio.sleep(0.3)
-                        return
+                        all_embeddings.extend(r.json().get("embeddings", []))
+                        if i + BATCH < len(texts):
+                            await _aio.sleep(SLEEP)
+                        continue
                 except Exception:
                     pass
                 # Legacy fallback — one at a time
-                for k, text in enumerate(batch):
-                    try:
-                        r = await c.post(
-                            f"{self.embed_url}/api/embeddings",
-                            json={"model": self.embed_model, "prompt": text},
-                            headers=self._emb_headers,
-                        )
-                        r.raise_for_status()
-                        all_embeddings[start + k] = r.json()["embedding"]
-                    except Exception as e:
-                        _lg.getLogger("rag").warning("Ollama embed fallback failed: %s", e)
-                        all_embeddings[start + k] = []
-
-        # Process batches with limited concurrency
-        sem = _aio.Semaphore(CONCURRENCY)
-        async def bounded(idx, batch):
-            async with sem:
-                await embed_batch(idx, batch)
-
-        await _aio.gather(*[bounded(i, b) for i, b in enumerate(batches)])
-        # Filter None entries (failed batches)
-        return [e if e is not None else [] for e in all_embeddings]
+                for text in batch:
+                    r = await c.post(
+                        f"{self.embed_url}/api/embeddings",
+                        json={"model": self.embed_model, "prompt": text},
+                        headers=self._emb_headers,
+                    )
+                    r.raise_for_status()
+                    all_embeddings.append(r.json()["embedding"])
+                if i + BATCH < len(texts):
+                    await _aio.sleep(SLEEP)
+        return all_embeddings
 
     async def _embed_google(self, texts: list[str]) -> list[list[float]]:
         """Google Gemini batch embedding with provider-aware rate limiting."""
@@ -247,7 +225,8 @@ class OllamaClient:
                         {"model": f"models/{model}",
                          "content": {"parts": [{"text": t}]},
                          "taskType": "RETRIEVAL_DOCUMENT",
-                         "outputDimensionality": self.dims_for_provider("google")}
+                         "outputDimensionality": self.dims_for_provider(_c.embed_provider)
+                         }
                         for t in batch
                     ]
                 }
@@ -350,11 +329,11 @@ class OllamaClient:
                                     else:
                                         _log.error("Jina half-batch also failed: %s", hr.text[:100])
                                         # Skip bad chunks — fill with zeros
-                                        all_embeddings.extend([[0.0] * self.dims_for_provider("jina")] * len(half))
+                                        all_embeddings.extend([[0.0] * self.dims_for_provider(_c.embed_provider)] * len(half))
                                 break
                             else:
                                 # Skip entire batch with zero vectors
-                                all_embeddings.extend([[0.0] * self.dims_for_provider("jina")] * len(clean_batch))
+                                all_embeddings.extend([[0.0] * self.dims_for_provider(_c.embed_provider)] * len(clean_batch))
                                 break
                         r.raise_for_status()
                         data = r.json()
